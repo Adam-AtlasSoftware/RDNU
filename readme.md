@@ -67,7 +67,7 @@ The inference engine translates the trained PyTorch model into a high-performanc
 - [x] **Phase I:** Environment Setup & Data Pipeline (RDG Framework Implementation, Dataset Acquisition, Synthetic Degradation Logic)
 - [ ] **Phase II:** The Inference Engine (ONNX Export, DirectML Custom Backend Initialization, WMMA Optimization)
 - [ ] **Phase III:** The DLL Hijack Framework (Targeting *Ready or Not*, OptiScaler Integration, Resource Capture & Backward Warping)
-- [ ] **Phase IV:** POC Validation & Gray Zone Warfare Preparation (Artifact mitigation, Anti-Cheat Strategies via Global Hook)
+- [ ] **Phase IV:** POC Validation & Gray Zone Warfare Preparation (Artifact mitigation)
 - [ ] **Phase V:** Open Source Plugin Release (DirectML-VSR-AMD plug-and-play D3D12-native path)
 
 ## Contributing
@@ -76,7 +76,7 @@ Contributions are welcome! Please feel free to submit a Pull Request or open an 
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GPL3 License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
