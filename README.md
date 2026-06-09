@@ -51,7 +51,7 @@ Training is handled via distributed PyTorch (DDP). Execution scripts are provide
 
 ## Model Architecture & Training Pipeline
 
-The core network is a causal recurrent model based on the Decoupled G-buffer Guidance (RDG) framework. The current iteration (Base variant) utilizes 36 feature channels to retain complex texture dictionaries and relies on SSIM, L1, FFT, and Temporal Consistency loss functions.
+The core network is a causal recurrent model based on the Decoupled G-buffer Guidance (RDG) framework. The current iteration (Base variant, called RDNU-L) utilizes 36 feature channels to retain complex texture dictionaries and relies on SSIM, L1, FFT, and Temporal Consistency loss functions. The smaller variant based on RDG-s (which we'll call RDNU-S) utilizes 16 channels.
 
 ### Dataset Processing
 The network is trained against the **MPI-Sintel** and **Virtual KITTI 2 (vKITTI)** datasets with pretraining on **GameIR** and **M3VIR** and The data loaders dynamically synthesize incomplete G-Buffers to ensure the model processes a pipeline identical to commercial game engines:
@@ -59,6 +59,9 @@ The network is trained against the **MPI-Sintel** and **Virtual KITTI 2 (vKITTI)
 - **Albedo/BRDF Mapping:** Material boundaries are derived using raw Class Segmentation maps.
 - **Engine Flow:** The dataloaders parse raw `.flo` binaries and 16-bit vector maps, applying magnitude scaling appropriate for the targeted output resolution.
 - **Degradation:** Halton sequence jitter is applied prior to downsampling to mimic TAA characteristics.
+
+## Upscaler Implementation
+Scaffolding completed. Not added to the repo yet. Integration remains TODO.
 
 ## License
 
