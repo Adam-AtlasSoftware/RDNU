@@ -1,0 +1,11 @@
+import imageio.v3 as iio
+def fast_load_exr(path, buffer_type):
+    # Try imageio v3 for faster load
+    try:
+        image = iio.imread(path)
+        if image.ndim == 2:
+            image = image[:, :, None]
+        return image.astype(np.float32)
+    except Exception:
+        # Fall back to original
+        pass

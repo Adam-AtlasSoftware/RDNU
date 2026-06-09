@@ -1,0 +1,55 @@
+name: test_RDG-s_x4_latest
+model_type: VideoRenderModel
+scale: 4
+num_gpu: 4  # set num_gpu: 0 for cpu mode to avoid OOM
+manual_seed: 0
+
+datasets:
+  test_1:  # the 1st test dataset
+    name: M3VIR
+    type: M3VIRRecurrentDataset
+    dataroot_gt: /home/adam/2tb-workspace/RDNU/M3VIR-extracted
+    dataroot_lq: /home/adam/2tb-workspace/RDNU/M3VIR-extracted
+    meta_info_file: basicsr/data/meta_info/m3vir_train_meta_info.txt
+    io_backend:
+      type: disk
+
+    use_lq_normal: false
+    use_lq_brdf: false
+    use_lq_motion: true
+    use_lq_depth: true
+    use_gt_depth: true
+    use_dali: true
+    batch_size_per_gpu: 1
+    num_worker_per_gpu: 1
+    num_frame: 6
+    gt_size: 384
+
+# network structures
+network_g:
+  type: RDG
+  in_channle: 3
+  num_feat: 16
+  scale:  4
+
+
+# path
+path:
+  pretrain_network_g: /home/adam/2tb-workspace/RDNU/training_outputs/experiments/train_RDG_s_x4_GameIR/models/net_g_latest.pth
+  strict_load_g: false
+
+# validation settings
+val:
+  save_img: true
+  segment_frame: 100
+  suffix: ~  # add suffix to saved images, if None, use exp name
+
+  metrics:
+    psnr: # metric name, can be arbitrary
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false

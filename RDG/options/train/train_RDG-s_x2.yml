@@ -1,0 +1,143 @@
+# general settings
+name: train_RDG_s_x2_M3VIR
+model_type: VideoRenderModel
+scale: 2
+num_gpu: 4
+dist: true
+manual_seed: 0
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: CombinedGaming
+    type: CombinedRecurrentDataset
+    dataroot_gt: /home/adam/2tb-workspace/RDNU/data
+    dataroot_lq: /home/adam/2tb-workspace/RDNU/data
+    meta_info_file: basicsr/data/meta_info/combined_train_meta_info.txt
+    io_backend:
+      type: disk
+
+    num_frame: 6
+    gt_size: 128
+    use_lq_motion: true
+    use_lq_depth: true
+    use_gt_depth: true
+    use_gt_normal: true
+    use_lq_normal: true
+    use_gt_brdf: true
+    use_lq_brdf: true
+
+    use_dali: false
+    num_worker_per_gpu: 6
+    batch_size_per_gpu: 4
+    pin_memory: true
+    dataset_enlarge_ratio: 50
+    prefetch_mode: cuda
+    persistent_workers: true
+
+  val:
+    name: CombinedGaming
+    type: CombinedRecurrentDataset
+    dataroot_gt: /home/adam/2tb-workspace/RDNU/data
+    dataroot_lq: /home/adam/2tb-workspace/RDNU/data
+    meta_info_file: basicsr/data/meta_info/combined_train_meta_info.txt
+    io_backend:
+      type: disk
+
+    use_lq_motion: true
+    use_lq_depth: true
+    use_gt_depth: true
+    use_gt_normal: true
+    use_lq_normal: true
+    use_gt_brdf: true
+    use_lq_brdf: true
+
+    use_dali: false
+    batch_size_per_gpu: 1
+    num_worker_per_gpu: 1
+    num_frame: 6
+    gt_size: 384
+    phase: val
+
+# network structures
+network_g:
+  type: RDG
+  in_channle: 3
+  num_feat: 16
+  scale: 2
+
+# path
+path:
+  pretrain_network_g: /home/adam/2tb-workspace/RDNU/training_outputs/experiments/train_RDG_s_x4_GameIR/models/net_g_latest.pth
+  strict_load_g: false
+  resume_state: ~
+
+# training settings
+train:
+  ema_decay: 0.999
+  use_amp: true # Enabled AMP for faster training and better FP16 stability on RDNA3
+  clip_grad: 1.0
+  optim_g:
+    type: Adam
+    lr: !!float 5e-5
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: CosineAnnealingRestartLR
+    periods: [200000]
+    restart_weights: [1]
+    eta_min: !!float 1e-7
+
+  warmup_iter: 5000
+  total_iter: 200000
+
+  # losses
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 1.0
+    reduction: mean
+
+  consisten_opt:
+    type: ConsistencyLoss
+    loss_weight: 1.0
+    reduction: mean
+
+  fft_opt:
+    type: FFTLoss
+    loss_weight: 0.05
+    reduction: mean
+
+
+# validation settings
+val:
+  val_freq: 999999999
+  save_img: false
+
+  metrics:
+    # psnr: # metric name, can be arbitrary
+    # type: calculate_psnr
+    # crop_border: 2
+    # test_y_channel: false
+    # ssim:
+    #   type: calculate_ssim
+    #   crop_border: 2
+    #   test_y_channel: False
+    #   better: higher  # the higher, the better. Default: higher
+
+# logging settings
+logger:
+  print_freq: 20                # CHANGED FROM 1: Reduces logging I/O blocks by 20x
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+  dist_params:
+    backend: nccl
+    port: 29500
+
+find_unused_parameters: true 
+auto_resume: true

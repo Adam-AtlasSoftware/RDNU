@@ -1,0 +1,127 @@
+# general settings
+name: train_RDG_s_x4_GameIR
+model_type: VideoRenderModel
+scale: 4
+num_gpu: 3  # official: 8 GPUs
+dist: true
+manual_seed: 0
+
+# dataset and data loader settings
+datasets:
+  train:
+    name: CombinedGaming
+    type: CombinedRecurrentDataset
+    dataroot_gt: /home/adam/2tb-workspace/RDNU/data
+    dataroot_lq: /home/adam/2tb-workspace/RDNU/data
+    meta_info_file: basicsr/data/meta_info/combined_train_meta_info.txt
+    io_backend:
+      type: disk
+
+    num_frame: 6
+    gt_size: 384
+    use_lq_normal: false
+    use_lq_brdf: false
+    use_lq_motion: true
+    use_lq_depth: true
+    use_gt_depth: true
+    use_dali: true
+    num_worker_per_gpu: 10
+    batch_size_per_gpu: 3
+    pin_memory: true
+    dataset_enlarge_ratio: 100
+    prefetch_mode: ~
+    persistent_workers: true
+
+  # val:
+  #   name: Render
+  #   type: RenderRecurrentTestDataset
+  #   dataroot_gt: /home/adam/2tb-workspace/RDNU/data/GameIR/mini_dataset/test/GameIR-SR
+  #   dataroot_lq: /home/adam/2tb-workspace/RDNU/data/GameIR/mini_dataset/test/GameIR-SR
+  #   meta_info_file: basicsr/data/meta_info/ValData_meta_info.txt
+  #   cache_data: false
+  #   use_lq_normal: false
+  #   use_lq_brdf: false
+  #   use_lq_motion: false
+  #   use_lq_depth: true
+
+# network structures
+network_g:
+  type: RDG
+  in_channle: 3
+  num_feat: 16
+  scale:  4
+
+# path
+path:
+  pretrain_network_g: ~
+  strict_load_g: false
+  resume_state: ~
+
+# training settings
+train:
+  ema_decay: 0.999
+  use_amp: true # Enabled AMP for faster training and better FP16 stability on RDNA3
+  clip_grad: 1.0
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: CosineAnnealingRestartLR
+    periods: [300000]
+    restart_weights: [1]
+    eta_min: !!float 1e-7
+
+  total_iter: 300000
+
+  # losses
+  pixel_opt:
+    type: CharbonnierLoss
+    loss_weight: 1.0
+    reduction: mean
+
+  consisten_opt:
+    type: ConsistencyLoss
+    loss_weight: 1.0
+    reduction: mean
+
+  fft_opt:
+    type: FFTLoss
+    loss_weight: 0.05
+    reduction: mean
+
+
+# validation settings
+val:
+  val_freq: !!float 5e3
+  save_img: false
+
+  metrics:
+    psnr: # metric name, can be arbitrary
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: false
+    # ssim:
+    #   type: calculate_ssim
+    #   crop_border: 4
+    #   test_y_channel: False
+    #   better: higher  # the higher, the better. Default: higher
+
+# logging settings
+logger:
+  print_freq: 1
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+  dist_params:
+    backend: nccl
+    port: 29500
+
+find_unused_parameters: true
+auto_resume: true

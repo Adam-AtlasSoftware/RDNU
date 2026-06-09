@@ -1,0 +1,53 @@
+name: Quick_Validation_3060
+model_type: VideoRenderModel
+scale: 1.5
+num_gpu: 1
+
+datasets:
+  test_1:
+    name: Mixed_Val
+    type: CombinedRecurrentDataset
+    dataroot_gt: /home/adam/2tb-workspace/RDNU/data
+    dataroot_lq: /home/adam/2tb-workspace/RDNU/data
+    meta_info_file: basicsr/data/meta_info/mixed_val_meta_info.txt
+    io_backend:
+      type: disk
+    scale: 1.5
+
+    use_lq_motion: true
+    use_lq_depth: true
+    use_gt_depth: true
+    use_gt_normal: true
+    use_lq_normal: true
+    use_gt_brdf: true
+    use_lq_brdf: true
+
+    use_dali: false
+    num_frame: 50
+    gt_size: 384
+    phase: val
+
+# network structures
+network_g:
+  type: RDG
+  in_channle: 3
+  num_feat: 36
+  scale: 2
+
+path:
+  pretrain_network_g: /home/adam/2tb-workspace/RDNU/RDG/experiments/train_RDG_Base_x2_M3VIR/models/net_g_195000.pth
+  strict_load_g: true
+
+val:
+  save_img: true
+  suffix: ~
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 0
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 0
+      test_y_channel: false
