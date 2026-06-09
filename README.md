@@ -5,9 +5,9 @@
 
 ## Overview
 
-The RDNA3 AI Temporal Upscaler (RDNU) is a spatial-temporal upscaling backend optimized for the AMD Radeon RX 7900 XTX (GFX11/RDNA3 architecture). 
+The RDNA3 AI Temporal Upscaler (RDNU) is a spatial-temporal upscaling backend optimized for the AMD Radeon RX 7900 XTX (GFX11/RDNA3 architecture).
 
-While traditional anti-aliasing resolves spatial jaggedness, modern video super-resolution (VSR) algorithms synthesize high-frequency details by aggregating sub-pixel shifts across a temporal dimension. This project implements a recurrent neural network upscaler that evaluates native game engine G-Buffers to reconstruct high-resolution outputs. 
+While traditional anti-aliasing resolves spatial jaggedness, modern video super-resolution (VSR) algorithms synthesize high-frequency details by aggregating sub-pixel shifts across a temporal dimension. This project implements a recurrent neural network upscaler that evaluates native game engine G-Buffers to reconstruct high-resolution outputs.
 
 The inference engine relies on a DirectML-accelerated DLL-hijacking framework designed to intercept rendering data from modern graphics APIs and execute the model using Wave Matrix Multiply-Accumulate (WMMA) hardware instructions. This interception occurs at the API level, providing compatibility across arbitrary rendering engines and pipelines. *Note: The C++/DirectML scaffolding for the rendering integration is maintained separately and will be merged into this repository in a future phase.*
 
@@ -41,7 +41,7 @@ cd RDNU
 ```
 
 ### Environment Setup (Training)
-Training is handled via distributed PyTorch (DDP). Execution scripts are provided to configure the environment, define GPU utilization, and launch the distributed loop. 
+Training is handled via distributed PyTorch (DDP). Execution scripts are provided to configure the environment, define GPU utilization, and launch the distributed loop.
 
 ```bash
 # Launch the Base x2 architecture distributed training loop
@@ -82,3 +82,4 @@ This project is licensed under the GPL3 License - see the [LICENSE](LICENSE) fil
 
 - The [RDG (Efficient Video Super-Resolution for Real-time Rendering)](https://github.com/sunny2109/RDG) authors for the baseline architecture concept.
 - Creators of the [MPI-Sintel](http://sintel.is.tue.mpg.de/) and [Virtual KITTI 2](https://europe.naverlabs.com/research/computer-vision/proxy-virtual-worlds-vkitti-2/) datasets.
+- Creators of the [GameIR](https://huggingface.co/datasets/LLLebin/GameIR) and [M3VIR](https://huggingface.co/datasets/guluthemonster/M3VIR) datasets.
