@@ -1,4 +1,4 @@
-# RDNA3 AI Temporal Upscaler (RDNU)
+# Radeon Decoupled Neural Upscaler (RDNU)
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.5+](https://img.shields.io/badge/PyTorch-2.5+-ee4c2c.svg)](https://pytorch.org/)
