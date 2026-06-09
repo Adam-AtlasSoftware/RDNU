@@ -32,6 +32,9 @@ Meeting strict per-frame inference budgets at high output resolutions necessitat
 - Windows 10/11 (for the DirectML inference backend) / Linux (for training)
 - AMD Radeon RX 7000 Series GPU (Targeting RX 7900 XTX)
 
+### Training Note
+This project implements a very highly customized training configuration for RDG/BasicSR that is extremely optimized for AMD Zen2 CPUs (specifically, the AMD EPYC 7F52) and a quad Nvidia Ampere GPU setup without NVLink. It was tested periodically throuhgout training on a separate RTX3060 without interrupting the training schedule. If you intend on running this training yourself, you will likely need to adjust the configuration to your system. The /RDG/options/test and /RDG/options/train folders contain the relevant yaml files to configure. The G-Buffer data synthesis and other scripts should work independant of configuration. Consider adjusting the execution bash scripts as well to change CUDA visible devices if needed. 
+
 ### Cloning the Repository
 ```bash
 git clone https://github.com/Adam-AtlasSoftware/RDNU.git
