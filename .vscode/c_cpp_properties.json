@@ -1,0 +1,19 @@
+{
+  "version": 4,
+  "configurations": [
+    {
+      "name": "Win32",
+      "includePath": [
+        "${workspaceFolder}/runtime/src",
+        "${workspaceFolder}/runtime/external/FidelityFX-SDK_WithFSR4/Kits",
+        "${workspaceFolder}/runtime/external/FidelityFX-SDK_WithFSR4/Kits/Cauldron2/dx12/vcpkg_installed/x64-windows/x64-windows/include",
+        "${workspaceFolder}/runtime/external/DirectX-Headers/include",
+        "${workspaceFolder}/runtime/external/DirectX-Headers/include/directx"
+      ],
+      "defines": ["_WINDOWS", "UNICODE", "_UNICODE", "NDEBUG"],
+      "cStandard": "c17",
+      "cppStandard": "c++20",
+      "intelliSenseMode": "windows-msvc-x64"
+    }
+  ]
+}

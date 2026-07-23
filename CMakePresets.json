@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows x64 (MSVC / Ninja Multi-Config)",
+      "description": "Configure from a VS Developer environment, or let the CMake Tools 'Visual Studio ... amd64' kit set the MSVC toolchain.",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/windows",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "RDNU_BUILD_TESTS": "ON",
+        "RDNU_VALIDATE_SHADERS": "ON"
+      }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux x64 (GCC/Clang / Ninja Multi-Config)",
+      "description": "Cross-platform runtime work (Vulkan/CUDA backend is WIP). The Windows-only DX12 sample and smoke tests are disabled here.",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/linux",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "RDNU_BUILD_TESTS": "OFF",
+        "RDNU_VALIDATE_SHADERS": "ON",
+        "RDNU_BACKEND_VULKAN": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-debug",   "configurePreset": "windows", "configuration": "Debug" },
+    { "name": "windows-release", "configurePreset": "windows", "configuration": "Release" },
+    { "name": "linux-debug",     "configurePreset": "linux",   "configuration": "Debug" },
+    { "name": "linux-release",   "configurePreset": "linux",   "configuration": "Release" }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug FSR Sample (DX12, Debug)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/runtime/external/FidelityFX-SDK_WithFSR4/Samples/Upscalers/FidelityFX_FSR/dx12/x64/Debug/FidelityFX_FSR.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/runtime/external/FidelityFX-SDK_WithFSR4/Samples/Upscalers/FidelityFX_FSR/dx12/x64/Debug",
+      "environment": [],
+      "console": "integratedTerminal",
+      "preLaunchTask": "Build FSR Sample (Debug)"
+    },
+    {
+      "name": "Run FSR Sample (DX12, Release)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/runtime/external/FidelityFX-SDK_WithFSR4/Samples/Upscalers/FidelityFX_FSR/dx12/x64/Release/FidelityFX_FSR.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/runtime/external/FidelityFX-SDK_WithFSR4/Samples/Upscalers/FidelityFX_FSR/dx12/x64/Release",
+      "console": "integratedTerminal",
+      "preLaunchTask": "Build FSR Sample (Release)"
+    }
+  ]
+}

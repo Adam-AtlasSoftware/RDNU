@@ -1,0 +1,10 @@
+[submodule "runtime/external/DirectX-Headers"]
+	path = runtime/external/DirectX-Headers
+	url = https://github.com/microsoft/DirectX-Headers.git
+[submodule "runtime/external/vcpkg"]
+	path = runtime/external/vcpkg
+	url = https://github.com/microsoft/vcpkg.git
+[submodule "runtime/external/FidelityFX-SDK_WithFSR4"]
+	path = runtime/external/FidelityFX-SDK_WithFSR4
+	url = git@github.com:Adam-AtlasSoftware/FidelityFX-SDK_WithFSR4.git
+	branch = rdnu

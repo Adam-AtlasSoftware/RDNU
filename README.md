@@ -25,6 +25,26 @@ Meeting strict per-frame inference budgets at high output resolutions necessitat
 *   **Occupancy & Register Pressure:** Kernel configurations must strictly manage VGPR consumption to prevent drops in active wavefronts per CU, which masks memory latency.
 *   **LDS Tiling:** Custom pre-processing compute shaders utilize Local Data Share (LDS) tiling to avoid memory bandwidth saturation.
 
+## Repository Layout
+
+RDNU has two complementary halves in one repository:
+
+```
+RDNU/
+├── RDG/                  # Upstream RDG research code (BasicSR) — the training baseline
+├── scripts/              # Training, data-synthesis, profiling and utility scripts (Python)
+├── runtime/              # Native real-time upscaler (DX12/HLSL today; Vulkan/CUDA planned)
+│   ├── src/              #   DX12 backend + custom FidelityFX provider
+│   ├── shaders/          #   HLSL compute shaders (WMMA INT8 conv, CTR, DFM, upsample)
+│   ├── models/           #   Exported INT8/FP16 weights (Git LFS)
+│   ├── tools/            #   Weight export + build helpers
+│   ├── tests/            #   Toolchain smoke tests
+│   └── external/         #   Submodules: vcpkg, DirectX-Headers, FidelityFX-SDK fork
+├── docs/                 # Build + implementation docs
+├── CMakeLists.txt        # VS Code CMake entry point for the native runtime
+└── CMakePresets.json
+```
+
 ## Installation and Setup
 
 ### Prerequisites
@@ -37,8 +57,15 @@ This project implements a very highly customized training configuration for RDG/
 
 ### Cloning the Repository
 ```bash
-git clone https://github.com/Adam-AtlasSoftware/RDNU.git
+# Clone with submodules (vcpkg, DirectX-Headers, the FidelityFX-SDK fork).
+# The SDK fork submodule is fetched over SSH, so an SSH key with access to the
+# Adam-AtlasSoftware org is required.
+git clone --recurse-submodules git@github.com:Adam-AtlasSoftware/RDNU.git
 cd RDNU
+git lfs pull            # fetch the INT8/FP16 model weights (runtime/models/**/*.bin)
+
+# If you already cloned without --recurse-submodules:
+git submodule update --init --recursive
 ```
 
 ### Environment Setup (Training)
@@ -61,7 +88,30 @@ The network is trained against the **MPI-Sintel** and **Virtual KITTI 2 (vKITTI)
 - **Degradation:** Halton sequence jitter is applied prior to downsampling to mimic TAA characteristics.
 
 ## Upscaler Implementation
-Scaffolding completed. Not added to the repo yet. Integration remains TODO.
+
+The native runtime lives in [`runtime/`](runtime/) and integrates into a fork of AMD's
+FidelityFX SDK (the Cauldron2 / FSR DX12 sample), pinned as a submodule:
+
+| Path | Contents |
+|------|----------|
+| `runtime/src/` | DX12 backend (`rdg_dx12_backend.cpp`) + custom FidelityFX provider (`ffx_provider_rdg.h`) |
+| `runtime/shaders/` | HLSL compute shaders — WMMA INT8 conv, CTR temporal block, DFM, upsample |
+| `runtime/models/` | Exported INT8 / FP16 weights (Git LFS) |
+| `runtime/tools/` | `export_weights.py` (PyTorch → OHWI FP16/INT8 `.bin`) |
+| `runtime/external/FidelityFX-SDK_WithFSR4` | FSR SDK fork (`rdnu` branch) that compiles the RDNU backend into the sample |
+
+The DX12 backend currently builds *inside* the FSR sample (it depends on the full
+Cauldron/FidelityFX include+link tree). A standalone, cross-platform inference/test harness
+(Vulkan cooperative-matrix / CUDA) for **Nvidia + Linux** is planned — see
+[`docs/build-linux.md`](docs/build-linux.md).
+
+> **Status:** shaders are work-in-progress — the WMMA convolution kernel is a template
+> pending final wave-matrix wiring.
+
+### Building
+- **Windows (DX12 sample):** [`docs/build-windows.md`](docs/build-windows.md) — build, run and
+  debug entirely from **VS Code** (the Visual Studio IDE is not required).
+- **Linux / Nvidia (planned runtime):** [`docs/build-linux.md`](docs/build-linux.md).
 
 ## License
 

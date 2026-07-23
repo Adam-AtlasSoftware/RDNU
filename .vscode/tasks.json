@@ -1,0 +1,52 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build FSR Sample (Release)",
+      "detail": "MSBuild the FidelityFX FSR sample with the RDNU upscaler (no Visual Studio IDE).",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/runtime/tools/build_sample.ps1", "-Config", "Release"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$msCompile"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Build FSR Sample (Debug)",
+      "detail": "MSBuild the FSR sample in Debug.",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/runtime/tools/build_sample.ps1", "-Config", "Debug"],
+      "group": "build",
+      "problemMatcher": ["$msCompile"],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": true }
+    },
+    {
+      "label": "Rebuild FSR Sample (Release)",
+      "type": "shell",
+      "command": "pwsh",
+      "args": ["-NoProfile", "-File", "${workspaceFolder}/runtime/tools/build_sample.ps1", "-Config", "Release", "-Rebuild"],
+      "group": "build",
+      "problemMatcher": ["$msCompile"]
+    },
+    {
+      "label": "CMake Configure (host preset)",
+      "detail": "Configure the native runtime CMake project (picks the 'windows' or 'linux' preset by host).",
+      "type": "shell",
+      "command": "cmake",
+      "windows": { "args": ["--preset", "windows"] },
+      "linux":   { "args": ["--preset", "linux"] },
+      "osx":     { "args": ["--preset", "linux"] },
+      "problemMatcher": ["$cmake"]
+    },
+    {
+      "label": "Validate Shaders (DXC)",
+      "detail": "Best-effort HLSL validation. Requires 'dxc' on PATH and a prior CMake configure.",
+      "type": "shell",
+      "command": "cmake",
+      "windows": { "args": ["--build", "${workspaceFolder}/build/windows", "--config", "Release", "--target", "validate_shaders"] },
+      "linux":   { "args": ["--build", "${workspaceFolder}/build/linux", "--config", "Release", "--target", "validate_shaders"] },
+      "problemMatcher": []
+    }
+  ]
+}

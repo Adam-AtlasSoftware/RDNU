@@ -1,0 +1,37 @@
+# ===== Claude Code =====
+.claude/
+
+# ===== CMake / build output =====
+/build/
+/out/
+cmake-build-*/
+CMakeUserPresets.json
+
+# ===== Native build artifacts =====
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# ===== Redundant model archives (source of truth: runtime/models/) =====
+/RDNU_Model_*.tar.gz
+
+# ===== Vendored winpix (provided via vcpkg 'winpixevent' port) =====
+/winpix.nupkg
+/winpix_extracted/
+
+# ===== Visual Studio cruft (note: .vscode/*.json IS intentionally tracked) =====
+.vs/
+*.user
+*.suo
+
+# ===== Python =====
+__pycache__/
+*.pyc
+
+# ===== OS =====
+Thumbs.db
+.DS_Store

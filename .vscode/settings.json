@@ -1,0 +1,26 @@
+{
+  "cmake.sourceDirectory": "${workspaceFolder}",
+  "cmake.useCMakePresets": "always",
+  "cmake.buildDirectory": "${workspaceFolder}/build/${presetName}",
+
+  "files.associations": {
+    "*.hlsl": "hlsl",
+    "*.hlsli": "hlsl"
+  },
+
+  "files.exclude": {
+    "**/build": true,
+    "**/.vs": true
+  },
+
+  "search.exclude": {
+    "runtime/external/**": true,
+    "RDG/**": true,
+    "build/**": true
+  },
+
+  "[python]": {
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true
+  }
+}
