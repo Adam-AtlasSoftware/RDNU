@@ -20,11 +20,18 @@ The goal of this setup is to build, run and debug the RDNU DX12 upscaler entirel
 git clone --recurse-submodules git@github.com:Adam-AtlasSoftware/RDNU.git
 cd RDNU
 git lfs pull
+
+# One-time: point vcpkg's MSBuild integration at the submodule vcpkg.
+.\runtime\external\vcpkg\bootstrap-vcpkg.bat     # only if runtime\external\vcpkg\vcpkg.exe is missing
+.\runtime\external\vcpkg\vcpkg integrate install
 ```
 
 The FidelityFX SDK fork already ships its resolved vcpkg dependencies
-(`Kits/Cauldron2/dx12/vcpkg_installed/`), so no separate `vcpkg install` step is required to
-build the sample.
+(`Kits/Cauldron2/dx12/vcpkg_installed/`), so no `vcpkg install` is needed. But Cauldron uses
+`<VcpkgEnableManifest>`, so MSBuild pulls those headers/libs (DirectX-Headers, WinPixEventRuntime,
+…) in via vcpkg's **user-wide** integration — which hardcodes an absolute path. That means
+`vcpkg integrate install` must be run **per machine**, and re-run whenever the vcpkg location
+moves. Symptom if it's stale: `Cannot open include file: 'directx/d3d12.h'` / `'pix3.h'`.
 
 ## Building the FSR sample (the actual upscaler)
 

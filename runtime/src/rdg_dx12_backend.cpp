@@ -8,7 +8,7 @@
 #include <fstream>
 #include <codecvt>
 #include <locale>
-#include "RDNU_FP16/rdnu_weights_meta.h"
+#include "../models/RDNU_FP16/rdnu_weights_meta.h"
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
