@@ -63,24 +63,35 @@ Press **F5** and pick a configuration (`.vscode/launch.json`):
 The output executable is
 `runtime/external/FidelityFX-SDK_WithFSR4/Samples/Upscalers/FidelityFX_FSR/dx12/x64/<Config>/FidelityFX_FSR.exe`.
 
-## The CMake project (`runtime/`)
+## Building & running from CMake (VS Code CMake Tools)
 
-CMake here does **not** build the DX12 backend (that lives in the sample). It provides:
+You can drive the whole integration from CMake Tools. Configure once (CMake Tools does this on
+folder open, or `cmake --preset windows`), pick the config (Debug/Release) in the CMake Tools
+status bar, then choose a target and build it (**F7**):
 
-- `validate_shaders` — best-effort DXC validation of the HLSL compute shaders.
-- `rdnu_test_dxc`, `rdnu_test_compile` — tiny toolchain smoke tests (opt-in).
+| Target | What it does |
+|--------|--------------|
+| **`run_fsr_sample`** | Builds the sample (MSBuild) **then launches** `FidelityFX_FSR.exe` |
+| `fsr_sample` | Just MSBuilds the FSR sample (RDNU upscaler) in the active config |
+| `validate_shaders` | Best-effort DXC validation of the HLSL shaders (needs `dxc` on PATH) |
+| `rdnu_test_dxc`, `rdnu_test_compile` | Tiny toolchain smoke tests |
+
+**Fastest loop:** set the build target to **`run_fsr_sample`** and press **F7** — CMake builds the
+sample via MSBuild and launches it.
 
 ```powershell
-# Configure (CMake Tools does this automatically, or:)
-cmake --preset windows
-
-# Best-effort shader validation (needs dxc on PATH — e.g. from the Windows SDK bin)
+# CLI equivalents (from a configured build):
+cmake --build build/windows --config Debug --target fsr_sample       # build
+cmake --build build/windows --config Debug --target run_fsr_sample    # build + run
 cmake --build build/windows --config Release --target validate_shaders
 ```
 
-> The WMMA convolution shader is a work-in-progress template that depends on AMD wave-matrix
-> intrinsics; stock DXC will reject it until the kernel is finished. Validation failures for
-> `rdg_wmma_conv2d.hlsl` are expected for now.
+> `fsr_sample`/`run_fsr_sample` wrap the sample's MSBuild `.vcxproj` (CMake does not re-implement
+> the sample build). For **source-level debugging**, use the **F5** "Debug FSR Sample" config in
+> `.vscode/launch.json` instead — CMake Tools' own debug launch only handles CMake-built targets.
+>
+> The WMMA convolution shader is a WIP template that depends on AMD wave-matrix intrinsics, so
+> `validate_shaders` failures for `rdg_wmma_conv2d.hlsl` are expected until the kernel is finished.
 
 ## Intellisense
 

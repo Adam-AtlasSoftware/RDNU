@@ -60,6 +60,31 @@ if(RDNU_VALIDATE_SHADERS)
 endif()
 
 # ---------------------------------------------------------------------------
+# Windows: build & run the FidelityFX FSR sample (with the RDNU upscaler integrated)
+# straight from CMake, so VS Code's CMake Tools drives the whole integration:
+#   * target 'fsr_sample'      -> MSBuilds the sample in the active config (Debug/Release)
+#   * target 'run_fsr_sample'  -> builds it, then launches FidelityFX_FSR.exe
+# The sample is an MSBuild/.vcxproj project; these targets just wrap build_sample.ps1.
+# (For source-level debugging, use the F5 "Debug FSR Sample" config in .vscode/launch.json.)
+# ---------------------------------------------------------------------------
+if(WIN32)
+    set(RDNU_SAMPLE_PS1 "${RDNU_ROOT}/tools/build_sample.ps1")
+    set(RDNU_SAMPLE_BIN "${RDNU_SDK_DIR}/Samples/Upscalers/FidelityFX_FSR/dx12/x64/$<CONFIG>")
+
+    add_custom_target(fsr_sample
+        COMMAND pwsh -NoProfile -File "${RDNU_SAMPLE_PS1}" -Config $<CONFIG>
+        USES_TERMINAL
+        COMMENT "MSBuild: FidelityFX FSR sample (RDNU upscaler) — config $<CONFIG>")
+
+    add_custom_target(run_fsr_sample
+        COMMAND "${RDNU_SAMPLE_BIN}/FidelityFX_FSR.exe"
+        WORKING_DIRECTORY "${RDNU_SAMPLE_BIN}"
+        USES_TERMINAL
+        COMMENT "Running FidelityFX_FSR.exe ($<CONFIG>)")
+    add_dependencies(run_fsr_sample fsr_sample)
+endif()
+
+# ---------------------------------------------------------------------------
 # Placeholder for the future cross-platform (Linux/Nvidia) inference backend.
 # ---------------------------------------------------------------------------
 if(RDNU_BACKEND_VULKAN)

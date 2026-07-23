@@ -10,6 +10,7 @@
       "binaryDir": "${sourceDir}/build/windows",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
       "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
         "RDNU_BUILD_TESTS": "ON",
         "RDNU_VALIDATE_SHADERS": "ON"
       }
