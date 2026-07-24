@@ -104,9 +104,11 @@ if(WIN32)
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/hfb_block.rdnut"
         COMMAND ${CMAKE_COMMAND} -E echo "== CTR block      (frame0: to_q/to_kv -> cosine attn -> proj_out) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/ctr_block.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== DecodeLayer    (frame0: hfb(x,g)+x -> ctr(x,d)+x -> ffn(x)+x) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/decode_layer.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
-        COMMENT "Running the RDNU block engine on CCM + DFM + EncodeLayer + HFB + CTR blocks vs golden")
+        COMMENT "Running the RDNU block engine on all composite blocks vs golden")
 endif()
 
 # ---------------------------------------------------------------------------

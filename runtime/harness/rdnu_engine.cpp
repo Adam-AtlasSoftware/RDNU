@@ -133,6 +133,20 @@ std::vector<Op> programEncodeLayer()
     ops.push_back(Op{ "add", { "x1", "ffn_out" }, { "output" } });  // residual
     return ops;
 }
+
+// DecodeLayer: x = hfb(x, g) + x; x = ctr(x, d) + x; x = ffn(x) + x. (decoders.*/middle_decoders)
+// Frame-0 CTR (identity warp). g/depth are block-level feature inputs.
+std::vector<Op> programDecodeLayer()
+{
+    std::vector<Op> ops;
+    appendHFB(ops, "hfb.", "input", "g", "hfb_out");
+    ops.push_back(Op{ "add", { "input", "hfb_out" }, { "x1" } });   // residual
+    appendCTR(ops, "ctr.", "x1", "depth", "ctr_out");
+    ops.push_back(Op{ "add", { "x1", "ctr_out" }, { "x2" } });      // residual
+    appendCCM(ops, "ffn.", "x2", "ffn_out");
+    ops.push_back(Op{ "add", { "x2", "ffn_out" }, { "output" } });  // residual
+    return ops;
+}
 }
 
 int main(int argc, char** argv)
@@ -156,7 +170,8 @@ int main(int argc, char** argv)
 
     // Pick the block program from which weights the bundle carries.
     std::vector<Op> ops; const char* blockName;
-    if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
+    if (bundle.count("hfb.conv_g.weight")) { ops = programDecodeLayer(); blockName = "DecodeLayer"; }
+    else if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
     else if (bundle.count("conv_g.weight")) { ops = programHFB(); blockName = "HFB"; }
     else if (bundle.count("to_q.0.weight")) { ops = programCTR(); blockName = "CTR"; }
     else if (bundle.count("proj_in.0.weight")) { ops = programDFM(); blockName = "DFM"; }

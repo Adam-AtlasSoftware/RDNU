@@ -198,12 +198,14 @@ def main():
     # a consistent input->output pair for that layer.
     golden = {}
     golden_in = {}    # input[0] of each module (the primary feature input)
-    golden_in1 = {}   # input[1] where present (e.g. HFB's g-buffer, CTR's depth)
+    golden_in1 = {}   # input[1] where present (HFB's g-buffer, CTR/DecodeLayer's g)
+    golden_in2 = {}   # input[2] where present (DecodeLayer's depth)
     # First-frame (first call) captures. CTR is recurrent: on frame 0 pre_h is None, so it
     # self-attends with an identity motion-warp — the case to validate before grid-sample exists.
     golden_f = {}
     golden_f_in = {}
     golden_f_in1 = {}
+    golden_f_in2 = {}
     handles = []
     for name, mod in model.named_modules():
         if name == "":
@@ -219,6 +221,9 @@ def main():
             if len(i) > 1 and isinstance(i[1], torch.Tensor):
                 golden_in1[nm] = i[1].detach().float().cpu().numpy()
                 golden_f_in1.setdefault(nm, golden_in1[nm])
+            if len(i) > 2 and isinstance(i[2], torch.Tensor):
+                golden_in2[nm] = i[2].detach().float().cpu().numpy()
+                golden_f_in2.setdefault(nm, golden_in2[nm])
 
         handles.append(mod.register_forward_hook(hook))
 
@@ -315,11 +320,8 @@ def main():
             prefix + "fn.2.bias":   ok[ccm_name + ".fn.2.bias"].numpy(),
         }
 
-    def hfb_tensors(hfb_name, prefix):
-        # HFB's second feature input is the g-buffer (module input[1]); the engine resizes it
-        # to x's size, which is an identity when they already match (as at decoders.1, 64x64).
+    def hfb_weights(hfb_name, prefix):
         return {
-            prefix + "g":              golden_in1[hfb_name][0],
             prefix + "conv_g.weight":  ok[hfb_name + ".conv_g.weight"].numpy(),
             prefix + "conv_g.bias":    ok[hfb_name + ".conv_g.bias"].numpy(),
             prefix + "conv_x.weight":  ok[hfb_name + ".conv_x.weight"].numpy(),
@@ -328,10 +330,13 @@ def main():
             prefix + "proj_out.bias":   ok[hfb_name + ".proj_out.bias"].numpy(),
         }
 
-    def ctr_tensors(ctr_name, prefix):
-        # CTR's second feature input is depth (module input[1]); frame-0 (identity-warp) values.
+    def hfb_tensors(hfb_name, prefix):
+        # HFB's second feature input is the g-buffer (module input[1]); the engine resizes it
+        # to x's size, which is an identity when they already match (as at decoders.1, 64x64).
+        return {prefix + "g": golden_in1[hfb_name][0], **hfb_weights(hfb_name, prefix)}
+
+    def ctr_weights(ctr_name, prefix):
         return {
-            prefix + "depth":          golden_f_in1[ctr_name][0],
             prefix + "to_q.0.weight":  ok[ctr_name + ".to_q.0.weight"].numpy(),
             prefix + "to_q.0.bias":    ok[ctr_name + ".to_q.0.bias"].numpy(),
             prefix + "to_q.1.weight":  ok[ctr_name + ".to_q.1.weight"].numpy(),
@@ -343,6 +348,10 @@ def main():
             prefix + "proj_out.weight": ok[ctr_name + ".proj_out.weight"].numpy(),
             prefix + "proj_out.bias":   ok[ctr_name + ".proj_out.bias"].numpy(),
         }
+
+    def ctr_tensors(ctr_name, prefix):
+        # CTR's second feature input is depth (module input[1]); frame-0 (identity-warp) values.
+        return {prefix + "depth": golden_f_in1[ctr_name][0], **ctr_weights(ctr_name, prefix)}
 
     def emit_block_bundle(fname, name, tensors, desc, first=False):
         # first=True uses the frame-0 (first-call) captures — needed for CTR's identity-warp case.
@@ -375,6 +384,14 @@ def main():
     emit_block_bundle("ctr_block.rdnut", "decoders.1.ctr",   # frame 0: pre_h=None -> identity warp
                       ctr_tensors("decoders.1.ctr", ""),
                       "CTR block (frame0): to_q/to_kv -> cos-attn -> proj_out(cat[out,q2,depth])",
+                      first=True)
+    emit_block_bundle("decode_layer.rdnut", "decoders.1",    # frame 0 (CTR identity warp)
+                      {**hfb_weights("decoders.1.hfb", "hfb."),
+                       **ctr_weights("decoders.1.ctr", "ctr."),
+                       **ccm_tensors("decoders.1.ffn", "ffn."),
+                       "g":     golden_f_in1["decoders.1"][0],   # DecodeLayer input[1] (g-buffer)
+                       "depth": golden_f_in2["decoders.1"][0]},  # DecodeLayer input[2] (depth)
+                      "DecodeLayer (frame0): hfb(x,g)+x -> ctr(x,d)+x -> ffn(x)+x",
                       first=True)
 
     fc = golden.get("first_conv")
