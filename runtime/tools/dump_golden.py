@@ -275,6 +275,32 @@ def main():
         write_rdnut(os.path.join(OUT_DIR, fname), {"input": x, "golden_out": y})
         print(f"  bundle {fname:<24} {name:<28} in{tuple(x.shape)} -> out{tuple(y.shape)} (act)")
 
+    def conv_params(m):
+        (kh, kw) = m.kernel_size
+        (sh, sw) = m.stride
+        (ph, pw) = m.padding
+        return np.array([kh, kw, ph, pw, sh, sw, m.groups], dtype=np.float32)
+
+    def emit_ccm_block_bundle(fname, name):
+        # A whole CCM/FFN block (conv3x3 -> GELU -> conv1x1) in one bundle: the block input,
+        # every sub-conv's weight/bias + conv-params, and the block's golden output. The
+        # engine chains these on-GPU (ping-pong buffers) and validates the end-to-end result.
+        c0, c2 = mods[name + ".fn.0"], mods[name + ".fn.2"]
+        x = golden_in[name][0]
+        y = golden[name][0]
+        write_rdnut(os.path.join(OUT_DIR, fname), {
+            "input":       x,
+            "fn.0.weight": ok[name + ".fn.0.weight"].numpy(),
+            "fn.0.bias":   ok[name + ".fn.0.bias"].numpy(),
+            "fn.0.params": conv_params(c0),
+            "fn.2.weight": ok[name + ".fn.2.weight"].numpy(),
+            "fn.2.bias":   ok[name + ".fn.2.bias"].numpy(),
+            "fn.2.params": conv_params(c2),
+            "golden_out":  y,
+        })
+        print(f"  bundle {fname:<24} {name:<28} in{tuple(x.shape)} -> out{tuple(y.shape)} "
+              f"(CCM block: conv3x3->GELU->conv1x1)")
+
     print("wrote layer bundles:")
     emit_conv_bundle("first_conv.rdnut", "first_conv")                  # 3x3, 3->36
     emit_conv_bundle("ffn_conv3x3.rdnut", "encoders.0.0.ffn.fn.0")      # 3x3, 36->72
@@ -283,6 +309,7 @@ def main():
     emit_shift_bundle("cyclefc_shift_1x7.rdnut", "encoders.0.0.dfm.mlp_h")  # 1x7 shift, g36
     emit_shift_bundle("cyclefc_shift_7x1.rdnut", "encoders.0.0.dfm.mlp_w")  # 7x1 shift, g36
     emit_act_bundle("gelu.rdnut", "encoders.0.0.ffn.fn.1")             # GELU (exact/erf)
+    emit_ccm_block_bundle("ffn_block.rdnut", "encoders.0.0.ffn")       # conv3x3->GELU->conv1x1
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "

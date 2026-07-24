@@ -74,6 +74,24 @@ if(WIN32)
         DEPENDS rdnu_harness
         USES_TERMINAL
         COMMENT "Validating conv + shift + GELU primitives vs golden")
+
+    # rdnu_engine: chains several kernels on the GPU through ping-pong feature buffers to
+    # run a whole block (currently CCM/FFN) and validates the end-to-end result vs golden.
+    # Shares the DX12/.rdnut helpers with the harness via harness/rdnu_dx12.h.
+    add_executable(rdnu_engine harness/rdnu_engine.cpp)
+    target_link_libraries(rdnu_engine PRIVATE d3d12 dxgi dxguid)
+    add_custom_command(TARGET rdnu_engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxcompiler.dll" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxil.dll"       "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/conv2d.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/gelu.hlsl"   "$<TARGET_FILE_DIR:rdnu_engine>"
+        VERBATIM)
+    add_custom_target(run_engine
+        COMMAND ${CMAKE_COMMAND} -E echo "== CCM/FFN block  (conv3x3 -> GELU -> conv1x1) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/ffn_block.rdnut"
+        DEPENDS rdnu_engine
+        USES_TERMINAL
+        COMMENT "Running the RDNU block engine on the CCM/FFN block vs golden")
 endif()
 
 # ---------------------------------------------------------------------------
