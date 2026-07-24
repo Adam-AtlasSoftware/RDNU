@@ -126,11 +126,20 @@ void appendUpsample(std::vector<Op>& ops, const std::string& p, const std::strin
     ops.push_back(conv(n("up"), out, n("conv.weight"), n("conv.bias"), 3, 3, 1, 1, 1, 1, 1));
 }
 
+// Final UpSample head: Conv2d(dim -> 3*scale*scale) then PixelShuffle(scale). (UpSample in rdg_arch.py)
+void appendFinalUpSample(std::vector<Op>& ops, const std::string& p, const std::string& in, const std::string& out)
+{
+    auto n = [&](const std::string& s) { return p + s; };
+    ops.push_back(conv(in, n("conv"), n("0.weight"), n("0.bias"), 3, 3, 1, 1, 1, 1, 1));       // UpSample.0
+    ops.push_back(Op{ "pixelshuffle", { n("conv") }, { out }, "", "", 0, 0, 0, 0, /*r*/2, 2, 0 }); // PixelShuffle(2)
+}
+
 std::vector<Op> programDFM() { std::vector<Op> ops; appendDFM(ops, "", "input", "output"); return ops; }
 std::vector<Op> programCCM() { std::vector<Op> ops; appendCCM(ops, "", "input", "output"); return ops; }
 std::vector<Op> programHFB() { std::vector<Op> ops; appendHFB(ops, "", "input", "g", "output"); return ops; }
 std::vector<Op> programCTR() { std::vector<Op> ops; appendCTR(ops, "", "input", "depth", "output"); return ops; }
 std::vector<Op> programUpsample() { std::vector<Op> ops; appendUpsample(ops, "", "input", "output"); return ops; }
+std::vector<Op> programFinalUpSample() { std::vector<Op> ops; appendFinalUpSample(ops, "UpSample.", "input", "output"); return ops; }
 
 // EncodeLayer: x = dfm(x) + x; x = ffn(x) + x. (encoders.*.* in rdg_arch.py)
 std::vector<Op> programEncodeLayer()
@@ -184,6 +193,7 @@ int main(int argc, char** argv)
     else if (bundle.count("conv_g.weight")) { ops = programHFB(); blockName = "HFB"; }
     else if (bundle.count("to_q.0.weight")) { ops = programCTR(); blockName = "CTR"; }
     else if (bundle.count("proj_in.0.weight")) { ops = programDFM(); blockName = "DFM"; }
+    else if (bundle.count("UpSample.0.weight")) { ops = programFinalUpSample(); blockName = "UpSample"; }
     else if (bundle.count("conv.weight")) { ops = programUpsample(); blockName = "Upsample"; }
     else { ops = programCCM(); blockName = "CCM/FFN"; }
     std::printf("block: %s   (%zu ops)\n", blockName, ops.size());
@@ -242,6 +252,7 @@ int main(int argc, char** argv)
     ComPtr<ID3D12PipelineState> psoSoftmax = makePSO(L"softmax_rows.hlsl",   L"softmax_rows_CS");
     ComPtr<ID3D12PipelineState> psoApply   = makePSO(L"ctr_apply.hlsl",      L"ctr_apply_CS");
     ComPtr<ID3D12PipelineState> psoResize  = makePSO(L"resize.hlsl",         L"resize_CS");
+    ComPtr<ID3D12PipelineState> psoPShuf   = makePSO(L"pixelshuffle.hlsl",   L"pixelshuffle_CS");
 
     // ---- resource bookkeeping ----
     std::vector<ComPtr<ID3D12Resource>> alive;                    // keep every buffer alive
@@ -341,11 +352,21 @@ int main(int argc, char** argv)
             cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
-        else if (op.kind == "resize")   // bilinear ×scale (StrideH); slots: Cout=C, H, W, OH, OW
+        else if (op.kind == "resize")   // bilinear; slots: Cout=C, H, W, OH, OW
         {
-            uint32_t scale = op.StrideH;
-            out = { a.shape.c, a.shape.h * scale, a.shape.w * scale }; pso = psoResize.Get();
+            // Target size: from a reference input's spatial dims (ins[1]) if given, else ×StrideH.
+            if (op.ins.size() >= 2) { Value r = vals.at(op.ins[1]); out = { a.shape.c, r.shape.h, r.shape.w }; }
+            else { uint32_t s = op.StrideH; out = { a.shape.c, a.shape.h * s, a.shape.w * s }; }
+            pso = psoResize.Get();
             cst[3] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[11] = out.h; cst[12] = out.w;
+            gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
+        }
+        else if (op.kind == "pixelshuffle")   // (C*r*r,H,W)->(C,H*r,W*r); slots: Cin,H,W,Cout,StrideH=r,OH,OW
+        {
+            uint32_t r = op.StrideH;
+            out = { a.shape.c / (r * r), a.shape.h * r, a.shape.w * r }; pso = psoPShuf.Get();
+            cst[0] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = out.c;
+            cst[8] = r; cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
         else if (op.kind == "l2norm")   // per-channel spatial L2 normalize; slots: Cout=C, H, W

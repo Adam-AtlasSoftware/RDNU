@@ -389,6 +389,10 @@ def main():
                       {"conv.weight": ok["ups.1.conv.weight"].numpy(),
                        "conv.bias":   ok["ups.1.conv.bias"].numpy()},
                       "Upsampling: interpolate x2 (bilinear) -> conv3x3")
+    emit_block_bundle("upsample_head.rdnut", "UpSample",     # final head: conv 36->12 + PixelShuffle(2)
+                      {"UpSample.0.weight": ok["UpSample.0.weight"].numpy(),
+                       "UpSample.0.bias":   ok["UpSample.0.bias"].numpy()},
+                      "UpSample head: conv3x3 (36->12) -> PixelShuffle(2)")
     emit_block_bundle("decode_layer.rdnut", "decoders.1",    # frame 0 (CTR identity warp)
                       {**hfb_weights("decoders.1.hfb", "hfb."),
                        **ctr_weights("decoders.1.ctr", "ctr."),
