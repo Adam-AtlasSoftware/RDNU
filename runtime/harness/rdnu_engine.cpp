@@ -78,8 +78,25 @@ void appendCCM(std::vector<Op>& ops, const std::string& p, const std::string& in
     ops.push_back(conv(n("h1"),  out,     n("fn.2.weight"), n("fn.2.bias"), 1, 1, 0, 0, 1, 1, 1));
 }
 
+// HFB(dim, g_dim=6): cross-GELU-gated fusion of feature x and g-buffer g. Mirrors HFB.forward.
+// (The g -> x-size bilinear resize is an identity where the sizes already match, so it is omitted
+// here; a resize op will be added when validating HFB instances at coarser scales.)
+void appendHFB(std::vector<Op>& ops, const std::string& p, const std::string& xin, const std::string& gin, const std::string& out)
+{
+    auto n = [&](const std::string& s) { return p + s; };
+    ops.push_back(conv(gin, n("x2"), n("conv_g.weight"), n("conv_g.bias"), 3, 3, 1, 1, 1, 1, 1)); // 6->dim
+    ops.push_back(conv(xin, n("x1"), n("conv_x.weight"), n("conv_x.bias"), 3, 3, 1, 1, 1, 1, 1)); // dim->dim
+    ops.push_back(Op{ "gelu", { n("x2") }, { n("gx2") } });
+    ops.push_back(Op{ "gelu", { n("x1") }, { n("gx1") } });
+    ops.push_back(Op{ "mul", { n("x1"), n("gx2") }, { n("a") } });                                // x1 * gelu(x2)
+    ops.push_back(Op{ "mul", { n("x2"), n("gx1") }, { n("b") } });                                // x2 * gelu(x1)
+    ops.push_back(Op{ "concat", { n("a"), n("b") }, { n("cat") } });                              // -> 2*dim
+    ops.push_back(conv(n("cat"), out, n("proj_out.weight"), n("proj_out.bias"), 1, 1, 0, 0, 1, 1, 1)); // 2*dim->dim
+}
+
 std::vector<Op> programDFM() { std::vector<Op> ops; appendDFM(ops, "", "input", "output"); return ops; }
 std::vector<Op> programCCM() { std::vector<Op> ops; appendCCM(ops, "", "input", "output"); return ops; }
+std::vector<Op> programHFB() { std::vector<Op> ops; appendHFB(ops, "", "input", "g", "output"); return ops; }
 
 // EncodeLayer: x = dfm(x) + x; x = ffn(x) + x. (encoders.*.* in rdg_arch.py)
 std::vector<Op> programEncodeLayer()
@@ -110,12 +127,12 @@ int main(int argc, char** argv)
     }
 
     auto bundle = LoadRdnut(argv[1]);
-    const Tensor& input  = bundle.at("input");
     const Tensor& golden = bundle.at("golden_out");
 
     // Pick the block program from which weights the bundle carries.
     std::vector<Op> ops; const char* blockName;
     if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
+    else if (bundle.count("conv_g.weight")) { ops = programHFB(); blockName = "HFB"; }
     else if (bundle.count("proj_in.0.weight")) { ops = programDFM(); blockName = "DFM"; }
     else { ops = programCCM(); blockName = "CCM/FFN"; }
     std::printf("block: %s   (%zu ops)\n", blockName, ops.size());
@@ -178,11 +195,20 @@ int main(int argc, char** argv)
 
     auto VA = [](const Value& v) { return v.res->GetGPUVirtualAddress() + v.off; };
 
-    // Input feature map (upload heap; always readable, so not tracked in rstate).
+    // External feature inputs = op-input names that no op (or chunk) produces. Load each from the
+    // bundle onto an upload-heap buffer (always readable, so not tracked in rstate). This covers
+    // "input", plus extra feature inputs like HFB's "g" — weights ride op.weight/op.bias, not ins.
     {
-        auto up = UploadBuffer(dev.Get(), input.data.data(), input.data.size() * 4);
-        alive.push_back(up);
-        vals["input"] = { up.Get(), 0, { input.dims[0], input.dims[1], input.dims[2] } };
+        std::set<std::string> produced;
+        for (const Op& op : ops) for (const std::string& o : op.outs) produced.insert(o);
+        for (const Op& op : ops) for (const std::string& in : op.ins)
+        {
+            if (produced.count(in) || vals.count(in)) continue;
+            const Tensor& t = bundle.at(in);
+            auto up = UploadBuffer(dev.Get(), t.data.data(), t.data.size() * 4);
+            alive.push_back(up);
+            vals[in] = { up.Get(), 0, { t.dims[0], t.dims[1], t.dims[2] } };
+        }
     }
     auto uploadWB = [&](const std::string& name) {
         if (name.empty() || wbuf.count(name)) return;

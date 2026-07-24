@@ -96,9 +96,11 @@ if(WIN32)
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/dfm_block.rdnut"
         COMMAND ${CMAKE_COMMAND} -E echo "== EncodeLayer    (dfm(x)+x -> ffn(x)+x) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/encode_layer.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== HFB block      (conv_x/conv_g -> cross-GELU-gate -> concat -> proj_out) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/hfb_block.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
-        COMMENT "Running the RDNU block engine on the CCM/FFN + DFM + EncodeLayer blocks vs golden")
+        COMMENT "Running the RDNU block engine on the CCM + DFM + EncodeLayer + HFB blocks vs golden")
 endif()
 
 # ---------------------------------------------------------------------------

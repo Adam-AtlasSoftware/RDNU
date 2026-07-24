@@ -197,7 +197,8 @@ def main():
     # output is the golden). Both are captured on the same (final) frame, so they stay
     # a consistent input->output pair for that layer.
     golden = {}
-    golden_in = {}
+    golden_in = {}    # input[0] of each module (the primary feature input)
+    golden_in1 = {}   # input[1] where present (e.g. HFB's g-buffer, CTR's depth)
     handles = []
     for name, mod in model.named_modules():
         if name == "":
@@ -208,6 +209,8 @@ def main():
                 golden[nm] = o.detach().float().cpu().numpy()
             if len(i) and isinstance(i[0], torch.Tensor):
                 golden_in[nm] = i[0].detach().float().cpu().numpy()
+            if len(i) > 1 and isinstance(i[1], torch.Tensor):
+                golden_in1[nm] = i[1].detach().float().cpu().numpy()
 
         handles.append(mod.register_forward_hook(hook))
 
@@ -304,6 +307,19 @@ def main():
             prefix + "fn.2.bias":   ok[ccm_name + ".fn.2.bias"].numpy(),
         }
 
+    def hfb_tensors(hfb_name, prefix):
+        # HFB's second feature input is the g-buffer (module input[1]); the engine resizes it
+        # to x's size, which is an identity when they already match (as at decoders.1, 64x64).
+        return {
+            prefix + "g":              golden_in1[hfb_name][0],
+            prefix + "conv_g.weight":  ok[hfb_name + ".conv_g.weight"].numpy(),
+            prefix + "conv_g.bias":    ok[hfb_name + ".conv_g.bias"].numpy(),
+            prefix + "conv_x.weight":  ok[hfb_name + ".conv_x.weight"].numpy(),
+            prefix + "conv_x.bias":    ok[hfb_name + ".conv_x.bias"].numpy(),
+            prefix + "proj_out.weight": ok[hfb_name + ".proj_out.weight"].numpy(),
+            prefix + "proj_out.bias":   ok[hfb_name + ".proj_out.bias"].numpy(),
+        }
+
     def emit_block_bundle(fname, name, tensors, desc):
         x = golden_in[name][0]
         y = golden[name][0]
@@ -327,6 +343,9 @@ def main():
                       {**dfm_tensors("encoders.0.0.dfm", "dfm."),
                        **ccm_tensors("encoders.0.0.ffn", "ffn.")},
                       "EncodeLayer: x=dfm(x)+x; x=ffn(x)+x")
+    emit_block_bundle("hfb_block.rdnut", "decoders.1.hfb",   # x & g both 64x64 -> g-resize is identity
+                      hfb_tensors("decoders.1.hfb", ""),
+                      "HFB block: conv_x/conv_g -> cross-GELU-gate -> concat -> proj_out")
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "
