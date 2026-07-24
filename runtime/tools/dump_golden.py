@@ -495,6 +495,14 @@ def main():
 
     emit_int8_conv_bundle("int8_first_conv.rdnut", "first_conv.weight",
                           golden_f_in["first_conv"][0], 3, 3, 1, 1, 1, 1, 1)
+    emit_int8_conv_bundle("int8_ffn_3x3.rdnut", "encoders.0.0.ffn.fn.0.weight",
+                          golden_in["encoders.0.0.ffn.fn.0"][0], 3, 3, 1, 1, 1, 1, 1)     # 3x3 36->72
+    emit_int8_conv_bundle("int8_ffn_1x1.rdnut", "encoders.0.0.ffn.fn.2.weight",
+                          golden_in["encoders.0.0.ffn.fn.2"][0], 1, 1, 0, 0, 1, 1, 1)     # 1x1 72->36
+    emit_int8_conv_bundle("int8_dfm_dw3x3.rdnut", "encoders.0.0.dfm.proj_in.0.weight",
+                          golden_in["encoders.0.0.dfm.proj_in.0"][0], 3, 3, 1, 1, 1, 1, 36)  # depthwise g36
+    emit_int8_conv_bundle("int8_down_s2.rdnut", "downs.0.weight",
+                          golden_in["downs.0"][0], 3, 3, 1, 1, 2, 2, 1)                   # strided s2
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "

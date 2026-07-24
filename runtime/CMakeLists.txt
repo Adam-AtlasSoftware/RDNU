@@ -116,8 +116,12 @@ if(WIN32)
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/upsample_head.rdnut"
         COMMAND ${CMAKE_COMMAND} -E echo "== WHOLE MODEL    (process_forward, frame0) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/full_model.rdnut"
-        COMMAND ${CMAKE_COMMAND} -E echo "== INT8 first_conv (W8A8 vs numpy int8 ref) =="
+        COMMAND ${CMAKE_COMMAND} -E echo "== INT8 convs      (W8A8 vs numpy int8 ref: 3x3/1x1/depthwise/strided) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_first_conv.rdnut"
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_ffn_3x3.rdnut"
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_ffn_1x1.rdnut"
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_dfm_dw3x3.rdnut"
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_down_s2.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
         COMMENT "Running the RDNU block engine on all composite blocks vs golden")
