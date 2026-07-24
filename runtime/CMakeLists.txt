@@ -88,6 +88,10 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/mul.hlsl"    "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/add.hlsl"    "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/concat.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/l2norm_spatial.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/ctr_scores.hlsl"     "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/softmax_rows.hlsl"   "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/ctr_apply.hlsl"      "$<TARGET_FILE_DIR:rdnu_engine>"
         VERBATIM)
     add_custom_target(run_engine
         COMMAND ${CMAKE_COMMAND} -E echo "== CCM/FFN block  (conv3x3 -> GELU -> conv1x1) =="
@@ -98,9 +102,11 @@ if(WIN32)
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/encode_layer.rdnut"
         COMMAND ${CMAKE_COMMAND} -E echo "== HFB block      (conv_x/conv_g -> cross-GELU-gate -> concat -> proj_out) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/hfb_block.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== CTR block      (frame0: to_q/to_kv -> cosine attn -> proj_out) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/ctr_block.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
-        COMMENT "Running the RDNU block engine on the CCM + DFM + EncodeLayer + HFB blocks vs golden")
+        COMMENT "Running the RDNU block engine on CCM + DFM + EncodeLayer + HFB + CTR blocks vs golden")
 endif()
 
 # ---------------------------------------------------------------------------

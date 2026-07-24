@@ -199,6 +199,11 @@ def main():
     golden = {}
     golden_in = {}    # input[0] of each module (the primary feature input)
     golden_in1 = {}   # input[1] where present (e.g. HFB's g-buffer, CTR's depth)
+    # First-frame (first call) captures. CTR is recurrent: on frame 0 pre_h is None, so it
+    # self-attends with an identity motion-warp — the case to validate before grid-sample exists.
+    golden_f = {}
+    golden_f_in = {}
+    golden_f_in1 = {}
     handles = []
     for name, mod in model.named_modules():
         if name == "":
@@ -207,10 +212,13 @@ def main():
         def hook(m, i, o, nm=name):
             if isinstance(o, torch.Tensor):
                 golden[nm] = o.detach().float().cpu().numpy()
+                golden_f.setdefault(nm, golden[nm])
             if len(i) and isinstance(i[0], torch.Tensor):
                 golden_in[nm] = i[0].detach().float().cpu().numpy()
+                golden_f_in.setdefault(nm, golden_in[nm])
             if len(i) > 1 and isinstance(i[1], torch.Tensor):
                 golden_in1[nm] = i[1].detach().float().cpu().numpy()
+                golden_f_in1.setdefault(nm, golden_in1[nm])
 
         handles.append(mod.register_forward_hook(hook))
 
@@ -320,9 +328,27 @@ def main():
             prefix + "proj_out.bias":   ok[hfb_name + ".proj_out.bias"].numpy(),
         }
 
-    def emit_block_bundle(fname, name, tensors, desc):
-        x = golden_in[name][0]
-        y = golden[name][0]
+    def ctr_tensors(ctr_name, prefix):
+        # CTR's second feature input is depth (module input[1]); frame-0 (identity-warp) values.
+        return {
+            prefix + "depth":          golden_f_in1[ctr_name][0],
+            prefix + "to_q.0.weight":  ok[ctr_name + ".to_q.0.weight"].numpy(),
+            prefix + "to_q.0.bias":    ok[ctr_name + ".to_q.0.bias"].numpy(),
+            prefix + "to_q.1.weight":  ok[ctr_name + ".to_q.1.weight"].numpy(),
+            prefix + "to_q.1.bias":    ok[ctr_name + ".to_q.1.bias"].numpy(),
+            prefix + "to_kv.0.weight": ok[ctr_name + ".to_kv.0.weight"].numpy(),
+            prefix + "to_kv.0.bias":   ok[ctr_name + ".to_kv.0.bias"].numpy(),
+            prefix + "to_kv.1.weight": ok[ctr_name + ".to_kv.1.weight"].numpy(),
+            prefix + "to_kv.1.bias":   ok[ctr_name + ".to_kv.1.bias"].numpy(),
+            prefix + "proj_out.weight": ok[ctr_name + ".proj_out.weight"].numpy(),
+            prefix + "proj_out.bias":   ok[ctr_name + ".proj_out.bias"].numpy(),
+        }
+
+    def emit_block_bundle(fname, name, tensors, desc, first=False):
+        # first=True uses the frame-0 (first-call) captures — needed for CTR's identity-warp case.
+        gi, go = (golden_f_in, golden_f) if first else (golden_in, golden)
+        x = gi[name][0]
+        y = go[name][0]
         write_rdnut(os.path.join(OUT_DIR, fname), {"input": x, "golden_out": y, **tensors})
         print(f"  bundle {fname:<24} {name:<28} in{tuple(x.shape)} -> out{tuple(y.shape)} ({desc})")
 
@@ -346,6 +372,10 @@ def main():
     emit_block_bundle("hfb_block.rdnut", "decoders.1.hfb",   # x & g both 64x64 -> g-resize is identity
                       hfb_tensors("decoders.1.hfb", ""),
                       "HFB block: conv_x/conv_g -> cross-GELU-gate -> concat -> proj_out")
+    emit_block_bundle("ctr_block.rdnut", "decoders.1.ctr",   # frame 0: pre_h=None -> identity warp
+                      ctr_tensors("decoders.1.ctr", ""),
+                      "CTR block (frame0): to_q/to_kv -> cos-attn -> proj_out(cat[out,q2,depth])",
+                      first=True)
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "

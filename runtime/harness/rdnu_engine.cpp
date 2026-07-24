@@ -94,9 +94,34 @@ void appendHFB(std::vector<Op>& ops, const std::string& p, const std::string& xi
     ops.push_back(conv(n("cat"), out, n("proj_out.weight"), n("proj_out.bias"), 1, 1, 0, 0, 1, 1, 1)); // 2*dim->dim
 }
 
+// CTR (num_head=4): channel-wise cosine attention with motion/depth guidance. Mirrors CTR.forward
+// for the frame-0 case (pre_h=None -> self-attention with an identity motion-warp, so `to_kv` reads
+// `xin` directly and no grid-sample is needed). Op kinds: l2norm / scores / softmax / apply.
+// `Groups` carries num_head for the attention ops; dw3x3 convs use Groups=0 (depthwise, groups=Cin).
+void appendCTR(std::vector<Op>& ops, const std::string& p, const std::string& xin, const std::string& depthin, const std::string& out)
+{
+    auto n = [&](const std::string& s) { return p + s; };
+    const uint32_t H = 4;  // num_head
+    ops.push_back(conv(xin, n("tq0"), n("to_q.0.weight"), n("to_q.0.bias"), 1, 1, 0, 0, 1, 1, 1));    // 1x1 dim->2dim
+    ops.push_back(conv(n("tq0"), n("tq"), n("to_q.1.weight"), n("to_q.1.bias"), 3, 3, 1, 1, 1, 1, 0)); // dw3x3
+    ops.push_back(Op{ "chunk", { n("tq") }, { n("q1"), n("q2") } });
+    ops.push_back(conv(xin, n("tkv0"), n("to_kv.0.weight"), n("to_kv.0.bias"), 1, 1, 0, 0, 1, 1, 1));  // 1x1 dim->4dim
+    ops.push_back(conv(n("tkv0"), n("tkv"), n("to_kv.1.weight"), n("to_kv.1.bias"), 3, 3, 1, 1, 1, 1, 0)); // dw3x3
+    ops.push_back(Op{ "chunk", { n("tkv") }, { n("k"), n("v") } });
+    ops.push_back(Op{ "l2norm", { n("q1") }, { n("q1n") } });
+    ops.push_back(Op{ "l2norm", { n("k") }, { n("kn") } });
+    ops.push_back(Op{ "scores", { n("q1n"), n("kn") }, { n("attn") }, "", "", 0, 0, 0, 0, 0, 0, H });
+    ops.push_back(Op{ "softmax", { n("attn") }, { n("attnp") }, "", "", 0, 0, 0, 0, 0, 0, H });
+    ops.push_back(Op{ "apply", { n("attnp"), n("v") }, { n("att") }, "", "", 0, 0, 0, 0, 0, 0, H });
+    ops.push_back(Op{ "concat", { n("att"), n("q2") }, { n("cat1") } });                 // out + q2
+    ops.push_back(Op{ "concat", { n("cat1"), depthin }, { n("cat2") } });                // + depth
+    ops.push_back(conv(n("cat2"), out, n("proj_out.weight"), n("proj_out.bias"), 1, 1, 0, 0, 1, 1, 1)); // 1x1 (2dim+1)->dim
+}
+
 std::vector<Op> programDFM() { std::vector<Op> ops; appendDFM(ops, "", "input", "output"); return ops; }
 std::vector<Op> programCCM() { std::vector<Op> ops; appendCCM(ops, "", "input", "output"); return ops; }
 std::vector<Op> programHFB() { std::vector<Op> ops; appendHFB(ops, "", "input", "g", "output"); return ops; }
+std::vector<Op> programCTR() { std::vector<Op> ops; appendCTR(ops, "", "input", "depth", "output"); return ops; }
 
 // EncodeLayer: x = dfm(x) + x; x = ffn(x) + x. (encoders.*.* in rdg_arch.py)
 std::vector<Op> programEncodeLayer()
@@ -133,6 +158,7 @@ int main(int argc, char** argv)
     std::vector<Op> ops; const char* blockName;
     if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
     else if (bundle.count("conv_g.weight")) { ops = programHFB(); blockName = "HFB"; }
+    else if (bundle.count("to_q.0.weight")) { ops = programCTR(); blockName = "CTR"; }
     else if (bundle.count("proj_in.0.weight")) { ops = programDFM(); blockName = "DFM"; }
     else { ops = programCCM(); blockName = "CCM/FFN"; }
     std::printf("block: %s   (%zu ops)\n", blockName, ops.size());
@@ -180,11 +206,16 @@ int main(int argc, char** argv)
         Check(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso)), "CreateComputePipelineState");
         return pso;
     };
-    ComPtr<ID3D12PipelineState> psoConv   = makePSO(L"conv2d.hlsl", L"conv2d_CS");
-    ComPtr<ID3D12PipelineState> psoGelu   = makePSO(L"gelu.hlsl",   L"gelu_CS");
+    ComPtr<ID3D12PipelineState> psoConv    = makePSO(L"conv2d.hlsl", L"conv2d_CS");
+    ComPtr<ID3D12PipelineState> psoGelu    = makePSO(L"gelu.hlsl",   L"gelu_CS");
     ComPtr<ID3D12PipelineState> psoMul     = makePSO(L"mul.hlsl",    L"mul_CS");
     ComPtr<ID3D12PipelineState> psoAdd     = makePSO(L"add.hlsl",    L"add_CS");
-    ComPtr<ID3D12PipelineState> psoConcat = makePSO(L"concat.hlsl", L"concat_CS");
+    ComPtr<ID3D12PipelineState> psoConcat  = makePSO(L"concat.hlsl", L"concat_CS");
+    // CTR attention kernels.
+    ComPtr<ID3D12PipelineState> psoL2      = makePSO(L"l2norm_spatial.hlsl", L"l2norm_spatial_CS");
+    ComPtr<ID3D12PipelineState> psoScores  = makePSO(L"ctr_scores.hlsl",     L"ctr_scores_CS");
+    ComPtr<ID3D12PipelineState> psoSoftmax = makePSO(L"softmax_rows.hlsl",   L"softmax_rows_CS");
+    ComPtr<ID3D12PipelineState> psoApply   = makePSO(L"ctr_apply.hlsl",      L"ctr_apply_CS");
 
     // ---- resource bookkeeping ----
     std::vector<ComPtr<ID3D12Resource>> alive;                    // keep every buffer alive
@@ -256,22 +287,62 @@ int main(int argc, char** argv)
         Value a = vals.at(op.ins[0]);
         Shape out{};
         ID3D12PipelineState* pso = nullptr;
+        uint32_t cst[13] = { 0 };            // root constants (13 uints; slot meaning is per op kind)
+        uint32_t gx = 1, gy = 1, gz = 1;     // dispatch grid
+        bool twoInput = false;               // bind t1 = ins[1] (mul/add/concat/scores/apply)
+
         if (op.kind == "conv2d")
         {
             uploadWB(op.weight); uploadWB(op.bias);
+            uint32_t groups = (op.Groups == 0) ? a.shape.c : op.Groups;   // 0 => depthwise (groups = Cin)
             out.c = bundle.at(op.weight).dims[0];
             out.h = (a.shape.h + 2 * op.PadH - op.KH) / op.StrideH + 1;
             out.w = (a.shape.w + 2 * op.PadW - op.KW) / op.StrideW + 1;
             pso = psoConv.Get();
+            cst[0] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = out.c;
+            cst[4] = op.KH; cst[5] = op.KW; cst[6] = op.PadH; cst[7] = op.PadW;
+            cst[8] = op.StrideH; cst[9] = op.StrideW; cst[10] = groups; cst[11] = out.h; cst[12] = out.w;
+            gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
-        else if (op.kind == "gelu") { out = a.shape; pso = psoGelu.Get(); }
-        else if (op.kind == "mul")  { out = a.shape; pso = psoMul.Get(); }
-        else if (op.kind == "add")  { out = a.shape; pso = psoAdd.Get(); }
-        else if (op.kind == "concat")
+        else if (op.kind == "gelu" || op.kind == "mul" || op.kind == "add" || op.kind == "concat")
         {
-            Value b = vals.at(op.ins[1]);
-            out = { a.shape.c + b.shape.c, a.shape.h, a.shape.w };
-            pso = psoConcat.Get();
+            twoInput = (op.kind != "gelu");
+            if (op.kind == "concat") { Value b = vals.at(op.ins[1]); out = { a.shape.c + b.shape.c, a.shape.h, a.shape.w }; }
+            else out = a.shape;
+            pso = op.kind == "gelu" ? psoGelu.Get() : op.kind == "mul" ? psoMul.Get()
+                : op.kind == "add" ? psoAdd.Get() : psoConcat.Get();
+            cst[0] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = out.c;
+            cst[11] = out.h; cst[12] = out.w;
+            gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
+        }
+        else if (op.kind == "l2norm")   // per-channel spatial L2 normalize; slots: Cout=C, H, W
+        {
+            out = a.shape; pso = psoL2.Get();
+            cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = a.shape.c;
+            gx = 1; gy = 1; gz = (a.shape.c + 63) / 64;
+        }
+        else if (op.kind == "scores")   // attn(head,Cq,Ck); slots: Cin=head, H=Cq, W=Ck, Cout=hw
+        {
+            twoInput = true; Value b = vals.at(op.ins[1]);
+            uint32_t head = op.Groups, Cq = a.shape.c / head, Ck = b.shape.c / head, hw = a.shape.h * a.shape.w;
+            out = { head, Cq, Ck }; pso = psoScores.Get();
+            cst[0] = head; cst[1] = Cq; cst[2] = Ck; cst[3] = hw;
+            gx = (Ck + 7) / 8; gy = (Cq + 7) / 8; gz = head;
+        }
+        else if (op.kind == "softmax")  // over Ck; slots: Cin=head, H=Cq, W=Ck
+        {
+            out = a.shape; pso = psoSoftmax.Get();
+            uint32_t head = a.shape.c, Cq = a.shape.h, Ck = a.shape.w;
+            cst[0] = head; cst[1] = Cq; cst[2] = Ck;
+            gx = (Cq + 7) / 8; gy = (head + 7) / 8; gz = 1;
+        }
+        else if (op.kind == "apply")    // out(head*Cq,H,W); slots: Cout, H, W, Groups=head, KH=Cq, KW=Ck
+        {
+            twoInput = true; Value b = vals.at(op.ins[1]);   // v: (head*Ck, H, W)
+            uint32_t head = op.Groups, Cq = a.shape.h, Ck = a.shape.w;
+            out = { head * Cq, b.shape.h, b.shape.w }; pso = psoApply.Get();
+            cst[1] = out.h; cst[2] = out.w; cst[3] = out.c; cst[4] = Cq; cst[5] = Ck; cst[10] = head;
+            gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
 
         auto outBuf = DefaultBuffer(dev.Get(), out.count() * 4, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -280,27 +351,23 @@ int main(int argc, char** argv)
         vals[op.outs[0]] = { outBuf.Get(), 0, out };
 
         cl->SetPipelineState(pso);
-        uint32_t consts[13] = { a.shape.c, a.shape.h, a.shape.w, out.c,
-                                op.KH, op.KW, op.PadH, op.PadW, op.StrideH, op.StrideW, op.Groups,
-                                out.h, out.w };
-        cl->SetComputeRoot32BitConstants(0, 13, consts, 0);
-        cl->SetComputeRootShaderResourceView(1, VA(a));                               // t0 = first input
+        cl->SetComputeRoot32BitConstants(0, 13, cst, 0);
+        cl->SetComputeRootShaderResourceView(1, VA(a));                              // t0 = first input
         if (op.kind == "conv2d")
         {
             cl->SetComputeRootShaderResourceView(2, wbuf.at(op.weight)->GetGPUVirtualAddress());
             cl->SetComputeRootShaderResourceView(3, op.bias.empty() ? zeroBiasVA(out.c)
                                                                     : wbuf.at(op.bias)->GetGPUVirtualAddress());
         }
-        else if (op.kind == "mul" || op.kind == "add" || op.kind == "concat")
+        else if (twoInput)
         {
-            cl->SetComputeRootShaderResourceView(2, VA(vals.at(op.ins[1])));          // t1 = second input
+            cl->SetComputeRootShaderResourceView(2, VA(vals.at(op.ins[1])));         // t1 = second input
         }
         cl->SetComputeRootUnorderedAccessView(4, outBuf->GetGPUVirtualAddress());
-        cl->Dispatch((out.w + 7) / 8, (out.h + 7) / 8, out.c);
+        cl->Dispatch(gx, gy, gz);
 
-        std::printf("  %-6s %-8s -> %-8s (%u,%u,%u)%s\n", op.kind.c_str(), op.ins[0].c_str(),
-                    op.outs[0].c_str(), out.c, out.h, out.w,
-                    (op.kind == "conv2d" && op.Groups > 1) ? "  (grouped)" : "");
+        std::printf("  %-8s %-9s -> %-9s (%u,%u,%u)\n", op.kind.c_str(), op.ins[0].c_str(),
+                    op.outs[0].c_str(), out.c, out.h, out.w);
     }
 
     // ---- final output: UAV -> COPY_SOURCE, read back ----
