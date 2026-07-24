@@ -115,6 +115,62 @@ def load_fp16_state_dict():
     return sd
 
 
+INT8_DIR = os.path.join(ROOT, "runtime", "models", "RDNU_INT8")
+
+
+def load_int8_model():
+    """Parse the exported W8A8 model (.h metadata + .bin blob). Returns (entries, blob)."""
+    hdr = open(os.path.join(INT8_DIR, "RDNU_Model_INT8_W8A8_Final.h")).read()
+    blob = open(os.path.join(INT8_DIR, "RDNU_Model_INT8_W8A8_Final.bin"), "rb").read()
+    rx = re.compile(r'\{"([^"]+)",\s*(true|false),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),'
+                    r'\s*(\d+),\s*\{([^}]*)\},\s*\{([^}]*)\},\s*(\d+)\}')
+    ents = {}
+    for m in rx.finditer(hdr):
+        ents[m.group(1)] = dict(
+            is_q=m.group(2) == "true",
+            w_off=int(m.group(3)), w_sz=int(m.group(4)), s_off=int(m.group(5)), s_sz=int(m.group(6)),
+            a_off=int(m.group(7)), b_off=int(m.group(8)), b_sz=int(m.group(9)),
+            orig=[int(x) for x in m.group(10).split(",") if x.strip()],
+            exp=[int(x) for x in m.group(11).split(",") if x.strip()])
+    return ents, blob
+
+
+def int8_layer(ents, blob, name):
+    """Return (wi8 (Cout,KH,KW,Cin/groups) fp32, w_scale (Cout,), a_scale scalar, bias (Cout,))."""
+    e = ents[name]
+    Cout_p, KH, KW, Cin_p = e["exp"]                 # OHWI padded
+    Cout, Cin_pg = e["orig"][0], e["orig"][1]         # OIHW: [Cout, Cin/groups, KH, KW]
+    wi8 = np.frombuffer(blob, np.int8, e["w_sz"], e["w_off"]).reshape(Cout_p, KH, KW, Cin_p)
+    wi8 = wi8[:Cout, :, :, :Cin_pg].astype(np.float32)
+    w_scale = np.frombuffer(blob, np.float16, e["s_sz"] // 2, e["s_off"]).astype(np.float32)[:Cout]
+    a_scale = np.float32(np.frombuffer(blob, np.float16, 1, e["a_off"])[0])
+    bias = np.frombuffer(blob, np.float16, e["b_sz"] // 2, e["b_off"]).astype(np.float32)[:Cout]
+    return wi8, w_scale, a_scale, bias
+
+
+def conv_int8_ref(x, wi8, w_scale, a_scale, bias, kh, kw, ph, pw, sh, sw, groups):
+    """Numpy W8A8 reference matching conv2d_int8.hlsl exactly (round-half-up, INT accumulation)."""
+    Cin, H, W = x.shape
+    Cout = wi8.shape[0]
+    OH = (H + 2 * ph - kh) // sh + 1
+    OW = (W + 2 * pw - kw) // sw + 1
+    inpg, outpg = Cin // groups, Cout // groups
+    xq = np.clip(np.floor(x / a_scale + 0.5), -127, 127).astype(np.int64)
+    xp = np.pad(xq, ((0, 0), (ph, ph), (pw, pw)))
+    wi = wi8.astype(np.int64)
+    out = np.zeros((Cout, OH, OW), np.float32)
+    for oc in range(Cout):
+        icbase = (oc // outpg) * inpg
+        acc = np.zeros((OH, OW), np.int64)
+        for icl in range(inpg):
+            ic = icbase + icl
+            for ky in range(kh):
+                for kx in range(kw):
+                    acc += xp[ic, ky:ky + sh * OH:sh, kx:kx + sw * OW:sw] * wi[oc, ky, kx, icl]
+        out[oc] = acc.astype(np.float32) * w_scale[oc] * a_scale + bias[oc]
+    return out
+
+
 def write_rdnut(path, tensors):
     """Write a simple self-contained tensor bundle the DX12 harness can read.
 
@@ -421,6 +477,24 @@ def main():
                       "DecodeLayer (frame0): hfb(x,g)+x -> ctr(x,d)+x -> ffn(x)+x",
                       first=True)
     emit_full_bundle("full_model.rdnut")                     # whole single-frame network (frame 0)
+
+    # ---- INT8 (W8A8) validation bundles: GPU int8 conv must reproduce the numpy int8 reference ----
+    ents8, blob8 = load_int8_model()
+
+    def emit_int8_conv_bundle(fname, layer, x, kh, kw, ph, pw, sh, sw, groups):
+        wi8, w_scale, a_scale, bias = int8_layer(ents8, blob8, layer)
+        y = conv_int8_ref(x, wi8, w_scale, a_scale, bias, kh, kw, ph, pw, sh, sw, groups)
+        write_rdnut(os.path.join(OUT_DIR, fname), {
+            "input": x, "golden_out": y,
+            "i8.w": np.ascontiguousarray(wi8), "i8.scale": w_scale,
+            "i8.ascale": np.array([a_scale], np.float32), "i8.bias": bias,
+            "i8p": np.array([kh, kw, ph, pw, sh, sw, groups], np.float32),
+        })
+        print(f"  bundle {fname:<24} {layer:<28} in{tuple(x.shape)} w{tuple(wi8.shape)} -> out{tuple(y.shape)} "
+              f"a_scale={a_scale:.4g} (INT8 W8A8)")
+
+    emit_int8_conv_bundle("int8_first_conv.rdnut", "first_conv.weight",
+                          golden_f_in["first_conv"][0], 3, 3, 1, 1, 1, 1, 1)
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "

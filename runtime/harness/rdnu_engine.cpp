@@ -47,6 +47,13 @@ Op conv(std::string in, std::string out, std::string w, std::string b,
     return Op{ "conv2d", { in }, { out }, w, b, kh, kw, ph, pw, sh, sw, g };
 }
 
+// INT8 (W8A8) conv. `wbase` names the bundle group: <wbase>.w / .scale / .bias / .ascale.
+Op convI8(std::string in, std::string out, std::string wbase,
+          uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw, uint32_t g)
+{
+    return Op{ "conv2d_int8", { in }, { out }, wbase, "", kh, kw, ph, pw, sh, sw, g };
+}
+
 // Sub-graphs are appended with a `p` prefix on their weight-bundle keys AND intermediate
 // value names, and explicit `in`/`out` feature names, so a block can be reused standalone
 // or composed inside a larger block (EncodeLayer, and later DecodeLayer) without collisions.
@@ -142,6 +149,14 @@ std::vector<Op> programHFB() { std::vector<Op> ops; appendHFB(ops, "", "input", 
 std::vector<Op> programCTR() { std::vector<Op> ops; appendCTR(ops, "", "input", "depth", "output"); return ops; }
 std::vector<Op> programUpsample() { std::vector<Op> ops; appendUpsample(ops, "", "input", "output"); return ops; }
 std::vector<Op> programFinalUpSample() { std::vector<Op> ops; appendFinalUpSample(ops, "UpSample.", "input", "output"); return ops; }
+// Single W8A8 conv (bundle carries params in "i8p" = [KH,KW,PadH,PadW,StrideH,StrideW,Groups]).
+std::vector<Op> programConvInt8(const std::vector<float>& p)
+{
+    std::vector<Op> ops;
+    auto u = [&](int i) { return uint32_t(std::lround(p[i])); };
+    ops.push_back(convI8("input", "output", "i8", u(0), u(1), u(2), u(3), u(4), u(5), u(6)));
+    return ops;
+}
 
 // EncodeLayer: x = dfm(x) + x; x = ffn(x) + x. (encoders.*.* in rdg_arch.py)
 void appendEncodeLayer(std::vector<Op>& ops, const std::string& p, const std::string& in, const std::string& out)
@@ -222,7 +237,8 @@ int main(int argc, char** argv)
 
     // Pick the block program from which weights the bundle carries.
     std::vector<Op> ops; const char* blockName;
-    if (bundle.count("first_conv.weight")) { ops = programFull(); blockName = "WholeModel"; }
+    if (bundle.count("i8p")) { ops = programConvInt8(bundle.at("i8p").data); blockName = "ConvInt8"; }
+    else if (bundle.count("first_conv.weight")) { ops = programFull(); blockName = "WholeModel"; }
     else if (bundle.count("hfb.conv_g.weight")) { ops = programDecodeLayer(); blockName = "DecodeLayer"; }
     else if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
     else if (bundle.count("conv_g.weight")) { ops = programHFB(); blockName = "HFB"; }
@@ -243,20 +259,21 @@ int main(int argc, char** argv)
     ComPtr<ID3D12GraphicsCommandList> cl;
     Check(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, alloc.Get(), nullptr, IID_PPV_ARGS(&cl)), "CreateCommandList");
 
-    // ---- root signature: root constants(b0,13) + SRV t0/t1/t2 + UAV u0 (all root descriptors) ----
-    D3D12_ROOT_PARAMETER params[5] = {};
+    // ---- root signature: root constants(b0,13) + SRV t0..t4 + UAV u0 (all root descriptors).
+    // 5 SRVs so the INT8 conv can bind input/weights/w_scale/bias/a_scale; FP ops use a subset. ----
+    D3D12_ROOT_PARAMETER params[7] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.Num32BitValues = 13;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    for (int i = 1; i <= 3; ++i)
+    for (int i = 1; i <= 5; ++i)   // t0..t4
     {
         params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
         params[i].Descriptor.ShaderRegister = UINT(i - 1);
         params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
-    params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-    params[4].Descriptor.ShaderRegister = 0;
-    params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    params[6].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;   // u0
+    params[6].Descriptor.ShaderRegister = 0;
+    params[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rsDesc{};
     rsDesc.NumParameters = _countof(params);
@@ -289,6 +306,7 @@ int main(int argc, char** argv)
     ComPtr<ID3D12PipelineState> psoResize  = makePSO(L"resize.hlsl",         L"resize_CS");
     ComPtr<ID3D12PipelineState> psoPShuf   = makePSO(L"pixelshuffle.hlsl",   L"pixelshuffle_CS");
     ComPtr<ID3D12PipelineState> psoAxpy    = makePSO(L"axpy.hlsl",           L"axpy_CS");
+    ComPtr<ID3D12PipelineState> psoConvI8  = makePSO(L"conv2d_int8.hlsl",    L"conv2d_int8_CS");
 
     // ---- resource bookkeeping ----
     std::vector<ComPtr<ID3D12Resource>> alive;                    // keep every buffer alive
@@ -377,6 +395,20 @@ int main(int argc, char** argv)
             cst[8] = op.StrideH; cst[9] = op.StrideW; cst[10] = groups; cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
+        else if (op.kind == "conv2d_int8")   // W8A8 conv; weights keyed off op.weight (+.w/.scale/.bias/.ascale)
+        {
+            uploadWB(op.weight + ".w"); uploadWB(op.weight + ".scale");
+            uploadWB(op.weight + ".bias"); uploadWB(op.weight + ".ascale");
+            uint32_t groups = (op.Groups == 0) ? a.shape.c : op.Groups;
+            out.c = bundle.at(op.weight + ".w").dims[0];
+            out.h = (a.shape.h + 2 * op.PadH - op.KH) / op.StrideH + 1;
+            out.w = (a.shape.w + 2 * op.PadW - op.KW) / op.StrideW + 1;
+            pso = psoConvI8.Get();
+            cst[0] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = out.c;
+            cst[4] = op.KH; cst[5] = op.KW; cst[6] = op.PadH; cst[7] = op.PadW;
+            cst[8] = op.StrideH; cst[9] = op.StrideW; cst[10] = groups; cst[11] = out.h; cst[12] = out.w;
+            gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
+        }
         else if (op.kind == "gelu" || op.kind == "mul" || op.kind == "add" || op.kind == "concat" || op.kind == "axpy")
         {
             twoInput = (op.kind != "gelu");
@@ -450,13 +482,20 @@ int main(int argc, char** argv)
             cl->SetComputeRootShaderResourceView(3, op.bias.empty() ? zeroBiasVA(out.c)
                                                                     : wbuf.at(op.bias)->GetGPUVirtualAddress());
         }
+        else if (op.kind == "conv2d_int8")   // t1=wi8, t2=w_scale, t3=bias, t4=a_scale (keyed off op.weight)
+        {
+            cl->SetComputeRootShaderResourceView(2, wbuf.at(op.weight + ".w")->GetGPUVirtualAddress());
+            cl->SetComputeRootShaderResourceView(3, wbuf.at(op.weight + ".scale")->GetGPUVirtualAddress());
+            cl->SetComputeRootShaderResourceView(4, wbuf.at(op.weight + ".bias")->GetGPUVirtualAddress());
+            cl->SetComputeRootShaderResourceView(5, wbuf.at(op.weight + ".ascale")->GetGPUVirtualAddress());
+        }
         else if (twoInput)
         {
             cl->SetComputeRootShaderResourceView(2, VA(vals.at(op.ins[1])));         // t1 = second input
             if (op.kind == "axpy")                                                   // t2 = per-channel alpha
                 cl->SetComputeRootShaderResourceView(3, wbuf.at(op.weight)->GetGPUVirtualAddress());
         }
-        cl->SetComputeRootUnorderedAccessView(4, outBuf->GetGPUVirtualAddress());
+        cl->SetComputeRootUnorderedAccessView(6, outBuf->GetGPUVirtualAddress());
         cl->Dispatch(gx, gy, gz);
 
         std::printf("  %-8s %-9s -> %-9s (%u,%u,%u)\n", op.kind.c_str(), op.ins[0].c_str(),
