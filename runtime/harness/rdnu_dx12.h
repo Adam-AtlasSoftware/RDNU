@@ -90,7 +90,8 @@ inline std::map<std::string, Tensor> LoadRdnut(const char* path)
 }
 
 // -------------------------------------------------------------- shader compile
-inline std::vector<uint8_t> CompileCS(const std::wstring& file, const wchar_t* entry, const wchar_t* profile)
+inline std::vector<uint8_t> CompileCS(const std::wstring& file, const wchar_t* entry, const wchar_t* profile,
+                                     const std::wstring& includeDir = L"")
 {
     HMODULE lib = LoadLibraryW(L"dxcompiler.dll");
     if (!lib) { std::printf("FATAL: dxcompiler.dll not found next to the exe\n"); std::exit(1); }
@@ -99,14 +100,18 @@ inline std::vector<uint8_t> CompileCS(const std::wstring& file, const wchar_t* e
     ComPtr<IDxcUtils> utils; ComPtr<IDxcCompiler3> comp;
     Check(pCreate(CLSID_DxcUtils, IID_PPV_ARGS(&utils)), "DxcCreateInstance(Utils)");
     Check(pCreate(CLSID_DxcCompiler, IID_PPV_ARGS(&comp)), "DxcCreateInstance(Compiler)");
+    ComPtr<IDxcIncludeHandler> incl;
+    utils->CreateDefaultIncludeHandler(&incl);   // resolves #include (e.g. AMD AGS wave-matrix header)
 
     ComPtr<IDxcBlobEncoding> src;
     Check(utils->LoadFile(file.c_str(), nullptr, &src), "LoadFile(shader)");
     DxcBuffer buf{ src->GetBufferPointer(), src->GetBufferSize(), DXC_CP_ACP };
 
-    LPCWSTR args[] = { L"-T", profile, L"-E", entry, L"-O3", L"-enable-16bit-types" };
+    std::wstring inc = L"-I" + includeDir;
+    std::vector<LPCWSTR> args = { L"-T", profile, L"-E", entry, L"-O3", L"-enable-16bit-types" };
+    if (!includeDir.empty()) args.push_back(inc.c_str());
     ComPtr<IDxcResult> res;
-    Check(comp->Compile(&buf, args, _countof(args), nullptr, IID_PPV_ARGS(&res)), "Compile");
+    Check(comp->Compile(&buf, args.data(), UINT(args.size()), incl.Get(), IID_PPV_ARGS(&res)), "Compile");
 
     ComPtr<IDxcBlobUtf8> errs;
     res->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errs), nullptr);

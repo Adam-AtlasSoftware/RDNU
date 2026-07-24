@@ -127,6 +127,23 @@ if(WIN32)
         DEPENDS rdnu_engine
         USES_TERMINAL
         COMMENT "Running the RDNU block engine on all composite blocks vs golden")
+
+    # rdnu_wmma_probe: minimal RDNA3 WMMA de-risk — one 16x16x16 INT8 GEMM tile via the AMD AGS
+    # wave-matrix intrinsics, validated vs a plain C++ matmul. Needs the AGS include dir + the
+    # vendored wave-matrix-capable dxcompiler.dll.
+    add_executable(rdnu_wmma_probe harness/rdnu_wmma_probe.cpp)
+    target_link_libraries(rdnu_wmma_probe PRIVATE d3d12 dxgi dxguid)
+    target_compile_definitions(rdnu_wmma_probe PRIVATE "RDNU_AGS_INC=\"${RDNU_AMD_HLSL_INC}\"")
+    add_custom_command(TARGET rdnu_wmma_probe POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxcompiler.dll" "$<TARGET_FILE_DIR:rdnu_wmma_probe>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxil.dll"       "$<TARGET_FILE_DIR:rdnu_wmma_probe>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/wmma_gemm.hlsl" "$<TARGET_FILE_DIR:rdnu_wmma_probe>"
+        VERBATIM)
+    add_custom_target(run_wmma_probe
+        COMMAND "$<TARGET_FILE:rdnu_wmma_probe>"
+        DEPENDS rdnu_wmma_probe
+        USES_TERMINAL
+        COMMENT "Probing RDNA3 WMMA (16x16x16 INT8 GEMM) on the 7900 XTX")
 endif()
 
 # ---------------------------------------------------------------------------
