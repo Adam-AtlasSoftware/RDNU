@@ -192,8 +192,12 @@ def main():
         "Motion": torch.randn(b, t, 2, r, r) * 2.0,
     }
 
-    # Capture every submodule's output tensor.
+    # Capture every submodule's input[0] and output tensor. Inputs let us build a
+    # self-contained .rdnut bundle for ANY layer (its input feeds the kernel, its
+    # output is the golden). Both are captured on the same (final) frame, so they stay
+    # a consistent input->output pair for that layer.
     golden = {}
+    golden_in = {}
     handles = []
     for name, mod in model.named_modules():
         if name == "":
@@ -202,6 +206,8 @@ def main():
         def hook(m, i, o, nm=name):
             if isinstance(o, torch.Tensor):
                 golden[nm] = o.detach().float().cpu().numpy()
+            if len(i) and isinstance(i[0], torch.Tensor):
+                golden_in[nm] = i[0].detach().float().cpu().numpy()
 
         handles.append(mod.register_forward_hook(hook))
 
@@ -216,15 +222,67 @@ def main():
     save.update({f"act.{k}": v for k, v in golden.items()})
     np.savez(os.path.join(OUT_DIR, "golden.npz"), **save)
 
-    # Self-contained validation bundle for the DX12 harness (first_conv).
-    # golden['first_conv'] is the last frame processed; pair it with that frame's image.
-    fi = args.frames - 1
-    write_rdnut(os.path.join(OUT_DIR, "first_conv.rdnut"), {
-        "input": inp["Image"][0, fi].numpy(),        # (3, H, W)
-        "weight": ok["first_conv.weight"].numpy(),   # (36, 3, 3, 3) OIHW
-        "bias": ok["first_conv.bias"].numpy(),       # (36,)
-        "golden_out": golden["first_conv"][0],       # (36, H, W)
-    })
+    # --- self-contained per-layer validation bundles for the DX12 harness ---
+    # Any nn.Conv2d layer can be turned into a bundle: its captured input feeds the
+    # kernel, its parameters + a small conv-params record drive the general conv2d
+    # shader, and its captured output is the golden. batch dim (0) is dropped.
+    mods = dict(model.named_modules())
+
+    def emit_conv_bundle(fname, name):
+        m = mods[name]
+        (kh, kw) = m.kernel_size
+        (sh, sw) = m.stride
+        (ph, pw) = m.padding
+        groups = m.groups
+        x = golden_in[name][0]                       # (Cin, H, W)
+        y = golden[name][0]                          # (Cout, OH, OW)
+        w = ok[name + ".weight"].numpy()             # (Cout, Cin/groups, kh, kw) OIHW
+        bkey = name + ".bias"
+        b = ok[bkey].numpy() if bkey in ok else np.zeros(w.shape[0], np.float32)
+        # params record (float32): [KH, KW, PadH, PadW, StrideH, StrideW, Groups]
+        params = np.array([kh, kw, ph, pw, sh, sw, groups], dtype=np.float32)
+        write_rdnut(os.path.join(OUT_DIR, fname), {
+            "input": x, "weight": w, "bias": b, "golden_out": y, "params": params,
+        })
+        print(f"  bundle {fname:<24} {name:<28} "
+              f"in{tuple(x.shape)} w{tuple(w.shape)} -> out{tuple(y.shape)}  "
+              f"k{kh}x{kw} s{sh}x{sw} p{ph}x{pw} g{groups}")
+
+    def emit_shift_bundle(fname, name):
+        # CycleFC's fixed depthwise "shift" conv (groups=in, non-square 1x7/7x1 kernel).
+        # It is an F.conv2d call, not a submodule, so we compute its golden directly with
+        # torch (still a real reference) using the module's registered shift_weight buffer.
+        m = mods[name]
+        (kh, kw) = m.kernel_size
+        pad_y, pad_x = kh // 2, kw // 2
+        xt = torch.from_numpy(golden_in[name])       # (b, Cin, H, W)
+        sw = m.shift_weight.detach()                 # (Cin, 1, kh, kw)
+        yt = F.conv2d(xt, sw, padding=(pad_y, pad_x), groups=m.in_channels)
+        params = np.array([kh, kw, pad_y, pad_x, 1, 1, m.in_channels], dtype=np.float32)
+        write_rdnut(os.path.join(OUT_DIR, fname), {
+            "input": xt[0].numpy(), "weight": sw.numpy(),
+            "bias": np.zeros(m.in_channels, np.float32),
+            "golden_out": yt[0].numpy(), "params": params,
+        })
+        print(f"  bundle {fname:<24} {name:<28} "
+              f"in{tuple(xt.shape[1:])} w{tuple(sw.shape)} -> out{tuple(yt.shape[1:])}  "
+              f"k{kh}x{kw} p{pad_y}x{pad_x} g{m.in_channels} (shift)")
+
+    def emit_act_bundle(fname, name):
+        # Pointwise activation (no params): captured input -> captured output.
+        x = golden_in[name][0]
+        y = golden[name][0]
+        write_rdnut(os.path.join(OUT_DIR, fname), {"input": x, "golden_out": y})
+        print(f"  bundle {fname:<24} {name:<28} in{tuple(x.shape)} -> out{tuple(y.shape)} (act)")
+
+    print("wrote layer bundles:")
+    emit_conv_bundle("first_conv.rdnut", "first_conv")                  # 3x3, 3->36
+    emit_conv_bundle("ffn_conv3x3.rdnut", "encoders.0.0.ffn.fn.0")      # 3x3, 36->72
+    emit_conv_bundle("ffn_conv1x1.rdnut", "encoders.0.0.ffn.fn.2")      # 1x1, 72->36
+    emit_conv_bundle("dfm_dw3x3.rdnut", "encoders.0.0.dfm.proj_in.0")   # 3x3 g36, 36->72 (depthwise)
+    emit_shift_bundle("cyclefc_shift_1x7.rdnut", "encoders.0.0.dfm.mlp_h")  # 1x7 shift, g36
+    emit_shift_bundle("cyclefc_shift_7x1.rdnut", "encoders.0.0.dfm.mlp_w")  # 7x1 shift, g36
+    emit_act_bundle("gelu.rdnut", "encoders.0.0.ffn.fn.1")             # GELU (exact/erf)
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "

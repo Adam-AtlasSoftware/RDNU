@@ -37,3 +37,4 @@ __pycache__/
 # ===== OS =====
 Thumbs.db
 .DS_Store
+docs/DEV_STATUS.md

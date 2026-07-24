@@ -143,7 +143,8 @@ int main(int argc, char** argv)
 {
     if (argc < 2) { std::printf("usage: rdnu_harness <bundle.rdnut> [shader.hlsl]\n"); return 1; }
 
-    std::wstring shaderPath;
+    // Optional args: [shader.hlsl] [entryPoint]. Default to the general conv2d kernel.
+    std::wstring shaderPath, entry = L"conv2d_CS";
     if (argc >= 3)
     {
         std::string s(argv[2]); shaderPath.assign(s.begin(), s.end());
@@ -152,18 +153,37 @@ int main(int argc, char** argv)
     {
         wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
         std::wstring dir(exe); dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
-        shaderPath = dir + L"first_conv.hlsl";
+        shaderPath = dir + L"conv2d.hlsl";
     }
+    if (argc >= 4) { std::string s(argv[3]); entry.assign(s.begin(), s.end()); }
 
     auto bundle = LoadRdnut(argv[1]);
     const Tensor& input  = bundle.at("input");       // (Cin, H, W)
-    const Tensor& weight = bundle.at("weight");      // (Cout, Cin, 3, 3)
-    const Tensor& bias   = bundle.at("bias");        // (Cout)
-    const Tensor& golden = bundle.at("golden_out");  // (Cout, H, W)
+    const Tensor& golden = bundle.at("golden_out");  // (Cout, OH, OW)
+    // weight/bias are optional: conv ops carry them, pointwise ops (e.g. GELU) do not.
+    const Tensor* weight = bundle.count("weight") ? &bundle.at("weight") : nullptr;
+    const Tensor* bias   = bundle.count("bias")   ? &bundle.at("bias")   : nullptr;
 
     const uint32_t Cin = input.dims[0], H = input.dims[1], W = input.dims[2];
-    const uint32_t Cout = weight.dims[0];
-    std::printf("first_conv: Cin=%u H=%u W=%u Cout=%u\n", Cin, H, W, Cout);
+    // Output channels + spatial dims all come from the golden tensor (Cout, OH, OW), so
+    // strided/grouped convs and paramless pointwise ops all size correctly.
+    const size_t gnd = golden.dims.size();
+    const uint32_t Cout = golden.dims[gnd - 3];
+    const uint32_t OH   = golden.dims[gnd - 2];
+    const uint32_t OW   = golden.dims[gnd - 1];
+
+    // Conv params record: [KH, KW, PadH, PadW, StrideH, StrideW, Groups].
+    // Absent (older bundles) -> default 3x3 / pad 1 / stride 1 / groups 1 (first_conv).
+    uint32_t KH = 3, KW = 3, PadH = 1, PadW = 1, StrideH = 1, StrideW = 1, Groups = 1;
+    if (auto it = bundle.find("params"); it != bundle.end() && it->second.data.size() >= 7)
+    {
+        const auto& p = it->second.data;
+        auto U = [](float f) { return uint32_t(std::lround(f)); };
+        KH = U(p[0]); KW = U(p[1]); PadH = U(p[2]); PadW = U(p[3]);
+        StrideH = U(p[4]); StrideW = U(p[5]); Groups = U(p[6]);
+    }
+    std::printf("conv: Cin=%u H=%u W=%u -> Cout=%u OH=%u OW=%u  k%ux%u s%ux%u p%ux%u g%u\n",
+        Cin, H, W, Cout, OH, OW, KH, KW, StrideH, StrideW, PadH, PadW, Groups);
 
     // ---- device (prefer the high-performance / discrete adapter) ----
     UINT flags = 0;
@@ -190,11 +210,12 @@ int main(int argc, char** argv)
     Check(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, alloc.Get(), nullptr, IID_PPV_ARGS(&cl)), "CreateCommandList");
 
     // ---- resources (inputs via upload heap bound as root SRVs; output default UAV) ----
-    auto inBuf = UploadBuffer(dev.Get(), input.data.data(),  input.data.size()  * 4);
-    auto wBuf  = UploadBuffer(dev.Get(), weight.data.data(), weight.data.size() * 4);
-    auto bBuf  = UploadBuffer(dev.Get(), bias.data.data(),   bias.data.size()   * 4);
+    auto inBuf = UploadBuffer(dev.Get(), input.data.data(), input.data.size() * 4);
+    ComPtr<ID3D12Resource> wBuf, bBuf;
+    if (weight) wBuf = UploadBuffer(dev.Get(), weight->data.data(), weight->data.size() * 4);
+    if (bias)   bBuf = UploadBuffer(dev.Get(), bias->data.data(),   bias->data.size()   * 4);
 
-    const size_t outBytes = size_t(Cout) * H * W * 4;
+    const size_t outBytes = size_t(Cout) * OH * OW * 4;
     ComPtr<ID3D12Resource> outBuf;
     {
         auto hp = HeapProps(D3D12_HEAP_TYPE_DEFAULT);
@@ -215,7 +236,7 @@ int main(int argc, char** argv)
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[0].Constants.ShaderRegister = 0;
     params[0].Constants.RegisterSpace = 0;
-    params[0].Constants.Num32BitValues = 4;
+    params[0].Constants.Num32BitValues = 13;
     params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     for (int i = 1; i <= 3; ++i)
     {
@@ -241,7 +262,7 @@ int main(int argc, char** argv)
     ComPtr<ID3D12RootSignature> rootSig;
     Check(dev->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&rootSig)), "CreateRootSignature");
 
-    auto dxil = CompileCS(shaderPath, L"first_conv_CS", L"cs_6_2");
+    auto dxil = CompileCS(shaderPath, entry.c_str(), L"cs_6_2");
     D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature = rootSig.Get();
     pd.CS = { dxil.data(), dxil.size() };
@@ -251,13 +272,13 @@ int main(int argc, char** argv)
     // ---- record ----
     cl->SetPipelineState(pso.Get());
     cl->SetComputeRootSignature(rootSig.Get());
-    uint32_t dims[4] = { Cin, H, W, Cout };
-    cl->SetComputeRoot32BitConstants(0, 4, dims, 0);
+    uint32_t consts[13] = { Cin, H, W, Cout, KH, KW, PadH, PadW, StrideH, StrideW, Groups, OH, OW };
+    cl->SetComputeRoot32BitConstants(0, 13, consts, 0);
     cl->SetComputeRootShaderResourceView(1, inBuf->GetGPUVirtualAddress());
-    cl->SetComputeRootShaderResourceView(2, wBuf->GetGPUVirtualAddress());
-    cl->SetComputeRootShaderResourceView(3, bBuf->GetGPUVirtualAddress());
+    if (weight) cl->SetComputeRootShaderResourceView(2, wBuf->GetGPUVirtualAddress());
+    if (bias)   cl->SetComputeRootShaderResourceView(3, bBuf->GetGPUVirtualAddress());
     cl->SetComputeRootUnorderedAccessView(4, outBuf->GetGPUVirtualAddress());
-    cl->Dispatch((W + 7) / 8, (H + 7) / 8, Cout);
+    cl->Dispatch((OW + 7) / 8, (OH + 7) / 8, Cout);
 
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

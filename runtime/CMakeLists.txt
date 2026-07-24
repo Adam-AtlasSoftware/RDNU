@@ -43,17 +43,37 @@ if(WIN32)
     set(RDNU_FFX_BIN "${RDNU_SDK_DIR}/Kits/Cauldron2/dx12/vcpkg_installed/x64-windows/x64-windows/bin")
     add_executable(rdnu_harness harness/rdnu_harness.cpp)
     target_link_libraries(rdnu_harness PRIVATE d3d12 dxgi dxguid)
-    # DXC (AMD build, wave-matrix capable) + dxil + the shader, staged next to the exe.
+    # DXC (AMD build, wave-matrix capable) + dxil + the harness shaders, staged next to
+    # the exe. conv2d.hlsl is the general direct-conv reference the harness defaults to;
+    # first_conv.hlsl is kept for reference (superseded by conv2d.hlsl).
     add_custom_command(TARGET rdnu_harness POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxcompiler.dll" "$<TARGET_FILE_DIR:rdnu_harness>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxil.dll"       "$<TARGET_FILE_DIR:rdnu_harness>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/conv2d.hlsl"     "$<TARGET_FILE_DIR:rdnu_harness>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/gelu.hlsl"       "$<TARGET_FILE_DIR:rdnu_harness>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/first_conv.hlsl" "$<TARGET_FILE_DIR:rdnu_harness>"
         VERBATIM)
+    # run_harness sweeps every validated primitive against the PyTorch golden. Conv ops use
+    # the default conv2d kernel; GELU passes an explicit shader+entry (pointwise, no weights).
+    set(RDNU_GOLDEN "${RDNU_ROOT}/tools/golden")
     add_custom_target(run_harness
-        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_ROOT}/tools/golden/first_conv.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== first_conv    (3x3,  3->36,  g1)  =="
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_GOLDEN}/first_conv.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== ffn.fn.0      (3x3,  36->72, g1)  =="
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_GOLDEN}/ffn_conv3x3.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== ffn.fn.2      (1x1,  72->36, g1)  =="
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_GOLDEN}/ffn_conv1x1.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== dfm.proj_in.0 (3x3,  36->72, g36) =="
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_GOLDEN}/dfm_dw3x3.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== cyclefc mlp_h (1x7 shift,    g36) =="
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_GOLDEN}/cyclefc_shift_1x7.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== cyclefc mlp_w (7x1 shift,    g36) =="
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_GOLDEN}/cyclefc_shift_7x1.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== ffn.fn.1      (GELU, erf)         =="
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_GOLDEN}/gelu.rdnut" "$<TARGET_FILE_DIR:rdnu_harness>/gelu.hlsl" "gelu_CS"
         DEPENDS rdnu_harness
         USES_TERMINAL
-        COMMENT "Running rdnu_harness on the first_conv golden bundle")
+        COMMENT "Validating conv + shift + GELU primitives vs golden")
 endif()
 
 # ---------------------------------------------------------------------------
