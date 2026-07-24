@@ -118,10 +118,19 @@ void appendCTR(std::vector<Op>& ops, const std::string& p, const std::string& xi
     ops.push_back(conv(n("cat2"), out, n("proj_out.weight"), n("proj_out.bias"), 1, 1, 0, 0, 1, 1, 1)); // 1x1 (2dim+1)->dim
 }
 
+// Upsampling: F.interpolate(x, scale_factor=2, bilinear) then a 3x3 conv. (ups.* in rdg_arch.py)
+void appendUpsample(std::vector<Op>& ops, const std::string& p, const std::string& in, const std::string& out)
+{
+    auto n = [&](const std::string& s) { return p + s; };
+    ops.push_back(Op{ "resize", { in }, { n("up") }, "", "", 0, 0, 0, 0, /*StrideH=scale*/2, 2, 0 });
+    ops.push_back(conv(n("up"), out, n("conv.weight"), n("conv.bias"), 3, 3, 1, 1, 1, 1, 1));
+}
+
 std::vector<Op> programDFM() { std::vector<Op> ops; appendDFM(ops, "", "input", "output"); return ops; }
 std::vector<Op> programCCM() { std::vector<Op> ops; appendCCM(ops, "", "input", "output"); return ops; }
 std::vector<Op> programHFB() { std::vector<Op> ops; appendHFB(ops, "", "input", "g", "output"); return ops; }
 std::vector<Op> programCTR() { std::vector<Op> ops; appendCTR(ops, "", "input", "depth", "output"); return ops; }
+std::vector<Op> programUpsample() { std::vector<Op> ops; appendUpsample(ops, "", "input", "output"); return ops; }
 
 // EncodeLayer: x = dfm(x) + x; x = ffn(x) + x. (encoders.*.* in rdg_arch.py)
 std::vector<Op> programEncodeLayer()
@@ -175,6 +184,7 @@ int main(int argc, char** argv)
     else if (bundle.count("conv_g.weight")) { ops = programHFB(); blockName = "HFB"; }
     else if (bundle.count("to_q.0.weight")) { ops = programCTR(); blockName = "CTR"; }
     else if (bundle.count("proj_in.0.weight")) { ops = programDFM(); blockName = "DFM"; }
+    else if (bundle.count("conv.weight")) { ops = programUpsample(); blockName = "Upsample"; }
     else { ops = programCCM(); blockName = "CCM/FFN"; }
     std::printf("block: %s   (%zu ops)\n", blockName, ops.size());
 
@@ -231,6 +241,7 @@ int main(int argc, char** argv)
     ComPtr<ID3D12PipelineState> psoScores  = makePSO(L"ctr_scores.hlsl",     L"ctr_scores_CS");
     ComPtr<ID3D12PipelineState> psoSoftmax = makePSO(L"softmax_rows.hlsl",   L"softmax_rows_CS");
     ComPtr<ID3D12PipelineState> psoApply   = makePSO(L"ctr_apply.hlsl",      L"ctr_apply_CS");
+    ComPtr<ID3D12PipelineState> psoResize  = makePSO(L"resize.hlsl",         L"resize_CS");
 
     // ---- resource bookkeeping ----
     std::vector<ComPtr<ID3D12Resource>> alive;                    // keep every buffer alive
@@ -328,6 +339,13 @@ int main(int argc, char** argv)
                 : op.kind == "add" ? psoAdd.Get() : psoConcat.Get();
             cst[0] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = out.c;
             cst[11] = out.h; cst[12] = out.w;
+            gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
+        }
+        else if (op.kind == "resize")   // bilinear ×scale (StrideH); slots: Cout=C, H, W, OH, OW
+        {
+            uint32_t scale = op.StrideH;
+            out = { a.shape.c, a.shape.h * scale, a.shape.w * scale }; pso = psoResize.Get();
+            cst[3] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
         else if (op.kind == "l2norm")   // per-channel spatial L2 normalize; slots: Cout=C, H, W

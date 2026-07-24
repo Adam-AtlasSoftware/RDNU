@@ -385,6 +385,10 @@ def main():
                       ctr_tensors("decoders.1.ctr", ""),
                       "CTR block (frame0): to_q/to_kv -> cos-attn -> proj_out(cat[out,q2,depth])",
                       first=True)
+    emit_block_bundle("upsample_block.rdnut", "ups.1",       # F.interpolate x2 (bilinear) + 3x3 conv
+                      {"conv.weight": ok["ups.1.conv.weight"].numpy(),
+                       "conv.bias":   ok["ups.1.conv.bias"].numpy()},
+                      "Upsampling: interpolate x2 (bilinear) -> conv3x3")
     emit_block_bundle("decode_layer.rdnut", "decoders.1",    # frame 0 (CTR identity warp)
                       {**hfb_weights("decoders.1.hfb", "hfb."),
                        **ctr_weights("decoders.1.ctr", "ctr."),
