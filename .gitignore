@@ -31,6 +31,8 @@ CMakeUserPresets.json
 # ===== Python =====
 __pycache__/
 *.pyc
+.venv/
+/runtime/tools/golden/
 
 # ===== OS =====
 Thumbs.db

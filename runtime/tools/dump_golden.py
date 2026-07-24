@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""
+dump_golden.py -- RDNU golden-reference generator (Phase 0 validation harness).
+
+Reconstructs the RDG model from the exported FP16 weights (or a .pth if supplied),
+runs it on a fixed deterministic input, and dumps every layer's output tensor as the
+"golden" reference that the DX12/WMMA engine is validated against, layer by layer.
+
+No basicsr install is required: the architecture modules in RDG/ are loaded directly
+with lightweight stubs for the few basicsr / torchvision symbols they import.
+
+Usage:
+    python dump_golden.py [--ckpt net_g.pth] [--res 64] [--frames 2] [--seed 0]
+
+Model config is pinned by the exported weights: num_feat=36, scale=2 (x2 network),
+enc/dec blocks [1,1], middle 1. The FP16 weight blob is stored OIHW (verified against
+the INT8 model).
+"""
+import os
+import re
+import sys
+import types
+import argparse
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+RDG_DIR = os.path.join(ROOT, "RDG")
+FP16_DIR = os.path.join(ROOT, "runtime", "models", "RDNU_FP16")
+OUT_DIR = os.path.join(os.path.dirname(__file__), "golden")
+
+
+# --------------------------------------------------------------------- stubs
+# The RDG arch imports a handful of basicsr / torchvision symbols. Rather than
+# installing the full (heavy, Python-3.8-era) basicsr package, inject minimal stubs.
+def _mod(name):
+    m = types.ModuleType(name)
+    sys.modules[name] = m
+    return m
+
+
+_mod("basicsr")
+_mod("basicsr.utils")
+_mod("basicsr.archs")
+
+_reg = _mod("basicsr.utils.registry")
+
+
+class _Registry:
+    def register(self, *a, **k):
+        def deco(cls):
+            return cls
+        return deco
+
+
+_reg.ARCH_REGISTRY = _Registry()
+
+
+def motion_warp(x, motion, interp_mode="bilinear", padding_mode="zeros", align_corners=True):
+    # Verbatim from basicsr/utils/render_data_util.py (pure torch, no cv2 dependency).
+    _, _, h, w = x.size()
+    if x.size()[-2:] != motion.size()[-2:]:
+        motion = F.interpolate(motion, size=(h, w), mode="bilinear")
+    motion = motion.permute(0, 2, 3, 1)
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(0, h).type_as(x), torch.arange(0, w).type_as(x), indexing="ij"
+    )
+    grid = torch.stack((grid_x, grid_y), 2).float()
+    grid.requires_grad = False
+    vgrid = grid + motion
+    vgx = 2.0 * vgrid[:, :, :, 0] / max(w - 1, 1) - 1.0
+    vgy = 2.0 * vgrid[:, :, :, 1] / max(h - 1, 1) - 1.0
+    vg = torch.stack((vgx, vgy), dim=3)
+    return F.grid_sample(x, vg, mode=interp_mode, padding_mode=padding_mode, align_corners=align_corners)
+
+
+_rd = _mod("basicsr.utils.render_data_util")
+_rd.motion_warp = motion_warp
+
+# torchvision.ops.deform_conv is imported by rdg_block but unused at inference time.
+_mod("torchvision")
+_mod("torchvision.ops")
+_dc = _mod("torchvision.ops.deform_conv")
+_dc.deform_conv2d = lambda *a, **k: None
+
+
+import importlib.util  # noqa: E402
+
+
+def _load(modname, path):
+    spec = importlib.util.spec_from_file_location(modname, path)
+    m = importlib.util.module_from_spec(spec)
+    sys.modules[modname] = m
+    spec.loader.exec_module(m)
+    return m
+
+
+_load("basicsr.archs.rdg_block", os.path.join(RDG_DIR, "basicsr", "archs", "rdg_block.py"))
+rdg_arch = _load("basicsr.archs.rdg_arch", os.path.join(RDG_DIR, "basicsr", "archs", "rdg_arch.py"))
+
+
+# ------------------------------------------------------------------- weights
+def load_fp16_state_dict():
+    """Reconstruct the PyTorch state_dict from the exported FP16 blob (OIHW)."""
+    meta = open(os.path.join(FP16_DIR, "rdnu_weights_meta.h")).read()
+    blob = open(os.path.join(FP16_DIR, "rdnu_weights.bin"), "rb").read()
+    entries = re.findall(r'\{"([^"]+)",\s*(\d+),\s*(\d+),\s*\{([^}]*)\},\s*(\d+)\}', meta)
+    sd = {}
+    for name, off, size, dims_s, nd in entries:
+        off, size, nd = int(off), int(size), int(nd)
+        dims = [int(x) for x in dims_s.split(",") if x.strip() != ""][:nd]
+        arr = np.frombuffer(blob, np.float16, size // 2, off).astype(np.float32)
+        sd[name] = torch.from_numpy(arr.copy()).reshape(dims)
+    return sd
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", default=None,
+                    help="optional net_g_*.pth (FP32 reference); default reconstructs from FP16")
+    ap.add_argument("--res", type=int, default=64, help="LR resolution (square)")
+    ap.add_argument("--frames", type=int, default=2, help="temporal frames")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+
+    torch.manual_seed(args.seed)
+    model = rdg_arch.RDG(in_channle=3, num_feat=36, scale=2,
+                         middle_blk_num=1, enc_blk_nums=[1, 1], dec_blk_nums=[1, 1])
+    model.eval()
+
+    if args.ckpt:
+        ck = torch.load(args.ckpt, map_location="cpu")
+        raw = ck.get("params", ck)
+        sd = {k.replace("module.", ""): v.float() for k, v in raw.items()}
+        src = f"checkpoint {args.ckpt}"
+    else:
+        sd = load_fp16_state_dict()
+        src = "FP16 export (reconstructed)"
+
+    # Load only shape-matching tensors; report anything off so layout bugs surface loudly.
+    model_sd = model.state_dict()
+    ok, mismatch = {}, []
+    for k, v in sd.items():
+        if k in model_sd and tuple(v.shape) == tuple(model_sd[k].shape):
+            ok[k] = v
+        elif k in model_sd:
+            mismatch.append((k, tuple(v.shape), tuple(model_sd[k].shape)))
+    model.load_state_dict(ok, strict=False)
+    missing = [k for k in model_sd if k not in ok]
+    unexpected = [k for k in sd if k not in model_sd]
+
+    print(f"Loaded weights from {src}")
+    print(f"  model tensors    : {len(model_sd)}")
+    print(f"  provided tensors : {len(sd)}   matched: {len(ok)}")
+    print(f"  missing keys     : {len(missing)}  {missing[:6]}")
+    print(f"  unexpected keys  : {len(unexpected)}  {unexpected[:6]}")
+    print(f"  shape mismatches : {len(mismatch)}  {mismatch[:6]}")
+
+    # Deterministic input (ranges roughly match training normalization: [0,1], small motion).
+    b, t, r = 1, args.frames, args.res
+
+    def rnd(c):
+        return torch.rand(b, t, c, r, r)
+
+    inp = {
+        "Image": rnd(3),
+        "Depth": rnd(1),
+        "Normal": rnd(3),
+        "BRDF": rnd(3),
+        "Motion": torch.randn(b, t, 2, r, r) * 2.0,
+    }
+
+    # Capture every submodule's output tensor.
+    golden = {}
+    handles = []
+    for name, mod in model.named_modules():
+        if name == "":
+            continue
+
+        def hook(m, i, o, nm=name):
+            if isinstance(o, torch.Tensor):
+                golden[nm] = o.detach().float().cpu().numpy()
+
+        handles.append(mod.register_forward_hook(hook))
+
+    with torch.no_grad():
+        out = model(inp)
+    for h in handles:
+        h.remove()
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+    save = {f"in.{k}": v.numpy() for k, v in inp.items()}
+    save["output"] = out.detach().numpy()
+    save.update({f"act.{k}": v for k, v in golden.items()})
+    np.savez(os.path.join(OUT_DIR, "golden.npz"), **save)
+
+    fc = golden.get("first_conv")
+    print(f"\nForward OK. output {tuple(out.shape)}  "
+          f"min {out.min():.4f} max {out.max():.4f} mean {out.mean():.4f}  "
+          f"nan={bool(torch.isnan(out).any())}")
+    print(f"captured {len(golden)} layer activations")
+    if fc is not None:
+        print(f"first_conv output {fc.shape}  mean {fc.mean():.5f}  std {fc.std():.5f}")
+    print(f"saved -> {os.path.join(OUT_DIR, 'golden.npz')}")
+
+
+if __name__ == "__main__":
+    main()
