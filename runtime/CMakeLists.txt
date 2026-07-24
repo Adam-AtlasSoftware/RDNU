@@ -144,6 +144,22 @@ if(WIN32)
         DEPENDS rdnu_wmma_probe
         USES_TERMINAL
         COMMENT "Probing RDNA3 WMMA (16x16x16 INT8 GEMM) on the 7900 XTX")
+
+    # rdnu_wmma_conv1x1: WMMA-accelerated INT8 1x1 conv (quant -> WMMA GEMM -> dequant),
+    # validated vs the conv2d_int8 golden (int8_ffn_1x1.rdnut).
+    add_executable(rdnu_wmma_conv1x1 harness/rdnu_wmma_conv1x1.cpp)
+    target_link_libraries(rdnu_wmma_conv1x1 PRIVATE d3d12 dxgi dxguid)
+    target_compile_definitions(rdnu_wmma_conv1x1 PRIVATE "RDNU_AGS_INC=\"${RDNU_AMD_HLSL_INC}\"")
+    add_custom_command(TARGET rdnu_wmma_conv1x1 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxcompiler.dll" "$<TARGET_FILE_DIR:rdnu_wmma_conv1x1>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxil.dll"       "$<TARGET_FILE_DIR:rdnu_wmma_conv1x1>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/wmma_conv1x1.hlsl" "$<TARGET_FILE_DIR:rdnu_wmma_conv1x1>"
+        VERBATIM)
+    add_custom_target(run_wmma_conv1x1
+        COMMAND "$<TARGET_FILE:rdnu_wmma_conv1x1>" "${RDNU_GOLDEN}/int8_ffn_1x1.rdnut"
+        DEPENDS rdnu_wmma_conv1x1
+        USES_TERMINAL
+        COMMENT "WMMA INT8 1x1 conv vs conv2d_int8 golden")
 endif()
 
 # ---------------------------------------------------------------------------
