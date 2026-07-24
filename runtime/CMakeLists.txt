@@ -85,13 +85,17 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxil.dll"       "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/conv2d.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/gelu.hlsl"   "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/mul.hlsl"    "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/concat.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
         VERBATIM)
     add_custom_target(run_engine
         COMMAND ${CMAKE_COMMAND} -E echo "== CCM/FFN block  (conv3x3 -> GELU -> conv1x1) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/ffn_block.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== DFM block      (proj_in -> chunk -> mlp_h/w -> gate/merge -> proj_out) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/dfm_block.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
-        COMMENT "Running the RDNU block engine on the CCM/FFN block vs golden")
+        COMMENT "Running the RDNU block engine on the CCM/FFN + DFM blocks vs golden")
 endif()
 
 # ---------------------------------------------------------------------------

@@ -301,6 +301,35 @@ def main():
         print(f"  bundle {fname:<24} {name:<28} in{tuple(x.shape)} -> out{tuple(y.shape)} "
               f"(CCM block: conv3x3->GELU->conv1x1)")
 
+    def emit_dfm_block_bundle(fname, name):
+        # A whole DFM block. Carries every sub-conv's weight/bias, both CycleFC shift buffers
+        # (registered buffers, pulled from the modules), the block input, and the block golden.
+        # The engine's DFM program owns the graph structure / conv params; this is just weights.
+        d = mods[name]
+        x = golden_in[name][0]
+        y = golden[name][0]
+        t = {
+            "input":              x,
+            "proj_in.0.weight":   ok[name + ".proj_in.0.weight"].numpy(),
+            "proj_in.0.bias":     ok[name + ".proj_in.0.bias"].numpy(),
+            "proj_in.1.weight":   ok[name + ".proj_in.1.weight"].numpy(),
+            "proj_in.1.bias":     ok[name + ".proj_in.1.bias"].numpy(),
+            "mlp_h.shift_weight": d.mlp_h.shift_weight.detach().numpy(),
+            "mlp_h.weight":       ok[name + ".mlp_h.weight"].numpy(),
+            "mlp_h.bias":         ok[name + ".mlp_h.bias"].numpy(),
+            "mlp_w.shift_weight": d.mlp_w.shift_weight.detach().numpy(),
+            "mlp_w.weight":       ok[name + ".mlp_w.weight"].numpy(),
+            "mlp_w.bias":         ok[name + ".mlp_w.bias"].numpy(),
+            "merge.weight":       ok[name + ".merge.weight"].numpy(),
+            "merge.bias":         ok[name + ".merge.bias"].numpy(),
+            "proj_out.weight":    ok[name + ".proj_out.weight"].numpy(),
+            "proj_out.bias":      ok[name + ".proj_out.bias"].numpy(),
+            "golden_out":         y,
+        }
+        write_rdnut(os.path.join(OUT_DIR, fname), t)
+        print(f"  bundle {fname:<24} {name:<28} in{tuple(x.shape)} -> out{tuple(y.shape)} "
+              f"(DFM block: proj_in->chunk->mlp_h/w->gate/merge->proj_out)")
+
     print("wrote layer bundles:")
     emit_conv_bundle("first_conv.rdnut", "first_conv")                  # 3x3, 3->36
     emit_conv_bundle("ffn_conv3x3.rdnut", "encoders.0.0.ffn.fn.0")      # 3x3, 36->72
@@ -310,6 +339,7 @@ def main():
     emit_shift_bundle("cyclefc_shift_7x1.rdnut", "encoders.0.0.dfm.mlp_w")  # 7x1 shift, g36
     emit_act_bundle("gelu.rdnut", "encoders.0.0.ffn.fn.1")             # GELU (exact/erf)
     emit_ccm_block_bundle("ffn_block.rdnut", "encoders.0.0.ffn")       # conv3x3->GELU->conv1x1
+    emit_dfm_block_bundle("dfm_block.rdnut", "encoders.0.0.dfm")       # full DFM block
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "

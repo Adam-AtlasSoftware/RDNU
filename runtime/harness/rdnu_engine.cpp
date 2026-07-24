@@ -4,17 +4,21 @@
 // the GPU through intermediate ("ping-pong") feature buffers, with no CPU round-trips
 // between layers, and validates the block's end-to-end result against the PyTorch golden.
 //
-// This first version runs the CCM/FFN block: conv3x3 -> GELU -> conv1x1. The op list is
-// built from the bundle (weights + per-conv params) and executed as a small graph; it is
-// the seed of the metadata-driven engine that will later run whole models. Correctness
-// first: same plain FP32 conv2d.hlsl / gelu.hlsl kernels the primitives were validated with.
+// Blocks it can run (program selected by which weights the bundle carries):
+//   * CCM/FFN : conv3x3 -> GELU -> conv1x1
+//   * DFM     : proj_in(dw3x3, 1x1) -> chunk -> [mlp_h/mlp_w shift+1x1] + gate + merge -> proj_out
+//
+// Ops: conv2d, gelu, mul (elementwise), concat (channels), chunk (a free offset-view: two
+// StructuredBuffer root SRVs into one parent buffer at a channel byte-offset). This is the
+// seed of the metadata-driven engine that will later run whole models. Correctness first:
+// the same plain FP32 conv2d/gelu/mul/concat kernels the primitives were validated with.
 //
 // Usage: rdnu_engine <block.rdnut> [shaderDir]
-//   shaderDir defaults to the executable's directory (where conv2d.hlsl / gelu.hlsl live).
+//   shaderDir defaults to the executable's directory (where the *.hlsl kernels live).
 
 #include "rdnu_dx12.h"
 
-#include <array>
+#include <set>
 
 namespace
 {
@@ -22,15 +26,55 @@ uint32_t U(float f) { return uint32_t(std::lround(f)); }
 
 struct Shape { uint32_t c, h, w; size_t count() const { return size_t(c) * h * w; } };
 
-// One node of the block graph. Feature tensors are referenced by name; weights/biases
-// name entries in the bundle. Conv fields are unused for pointwise ops (kind == "gelu").
+// A feature-map reference: a byte range inside an owning resource. `chunk` yields views
+// that share a parent resource (only the offset differs) — no copy, no dispatch.
+struct Value { ID3D12Resource* res; uint64_t off; Shape shape; };
+
+// One node of the block graph. Feature tensors are referenced by name; weight/bias name
+// bundle entries. Conv fields are unused for non-conv ops.
 struct Op
 {
-    std::string kind;               // "conv2d" | "gelu"
-    std::string in, out;            // feature-buffer names
-    std::string weight, bias;       // conv only
+    std::string kind;                 // conv2d | gelu | mul | concat | chunk
+    std::vector<std::string> ins;
+    std::vector<std::string> outs;
+    std::string weight, bias;
     uint32_t KH, KW, PadH, PadW, StrideH, StrideW, Groups;
 };
+
+Op conv(std::string in, std::string out, std::string w, std::string b,
+        uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw, uint32_t g)
+{
+    return Op{ "conv2d", { in }, { out }, w, b, kh, kw, ph, pw, sh, sw, g };
+}
+
+// CCM/FFN: conv3x3 -> GELU -> conv1x1.
+std::vector<Op> programCCM()
+{
+    return {
+        conv("input", "h0", "fn.0.weight", "fn.0.bias", 3, 3, 1, 1, 1, 1, 1),
+        Op{ "gelu", { "h0" }, { "h1" } },
+        conv("h1", "output", "fn.2.weight", "fn.2.bias", 1, 1, 0, 0, 1, 1, 1),
+    };
+}
+
+// DFM (dim=36, hidden=72). Mirrors DFM.forward in rdg_block.py.
+std::vector<Op> programDFM()
+{
+    return {
+        conv("input", "pi0", "proj_in.0.weight", "proj_in.0.bias", 3, 3, 1, 1, 1, 1, 36), // dw3x3 g36 36->72
+        conv("pi0", "pi", "proj_in.1.weight", "proj_in.1.bias", 1, 1, 0, 0, 1, 1, 1),      // 1x1 72->72
+        Op{ "chunk", { "pi" }, { "g", "c" } },                                             // -> g(36), c(36)
+        conv("c", "hsh", "mlp_h.shift_weight", "", 1, 7, 0, 3, 1, 1, 36),                  // 1x7 shift g36 (no bias)
+        conv("hsh", "hc", "mlp_h.weight", "mlp_h.bias", 1, 1, 0, 0, 1, 1, 1),              // 1x1 36->36
+        conv("hc", "wsh", "mlp_w.shift_weight", "", 7, 1, 3, 0, 1, 1, 36),                 // 7x1 shift g36 (no bias)
+        conv("wsh", "c2", "mlp_w.weight", "mlp_w.bias", 1, 1, 0, 0, 1, 1, 1),              // 1x1 36->36
+        Op{ "concat", { "input", "c2" }, { "cat" } },                                      // cat[x, c2] -> 72
+        conv("cat", "merged", "merge.weight", "merge.bias", 1, 1, 0, 0, 1, 1, 1),          // 1x1 72->36
+        Op{ "gelu", { "g" }, { "gact" } },                                                 // gelu(g)
+        Op{ "mul", { "gact", "merged" }, { "gated" } },                                    // gelu(g) * merged
+        conv("gated", "output", "proj_out.weight", "proj_out.bias", 1, 1, 0, 0, 1, 1, 1),  // 1x1 36->36
+    };
+}
 }
 
 int main(int argc, char** argv)
@@ -38,7 +82,11 @@ int main(int argc, char** argv)
     if (argc < 2) { std::printf("usage: rdnu_engine <block.rdnut> [shaderDir]\n"); return 1; }
 
     std::wstring shaderDir;
-    if (argc >= 3) { std::string s(argv[2]); shaderDir.assign(s.begin(), s.end()); if (shaderDir.back() != L'\\' && shaderDir.back() != L'/') shaderDir += L'\\'; }
+    if (argc >= 3)
+    {
+        std::string s(argv[2]); shaderDir.assign(s.begin(), s.end());
+        if (shaderDir.back() != L'\\' && shaderDir.back() != L'/') shaderDir += L'\\';
+    }
     else
     {
         wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -49,17 +97,9 @@ int main(int argc, char** argv)
     const Tensor& input  = bundle.at("input");
     const Tensor& golden = bundle.at("golden_out");
 
-    // ---- build the CCM/FFN block graph (conv3x3 -> GELU -> conv1x1) ----
-    const auto& p0 = bundle.at("fn.0.params").data;
-    const auto& p2 = bundle.at("fn.2.params").data;
-    std::vector<Op> ops = {
-        { "conv2d", "input", "h0",     "fn.0.weight", "fn.0.bias",
-          U(p0[0]), U(p0[1]), U(p0[2]), U(p0[3]), U(p0[4]), U(p0[5]), U(p0[6]) },
-        { "gelu",   "h0",    "h1",     "",            "",
-          0, 0, 0, 0, 0, 0, 0 },
-        { "conv2d", "h1",    "output", "fn.2.weight", "fn.2.bias",
-          U(p2[0]), U(p2[1]), U(p2[2]), U(p2[3]), U(p2[4]), U(p2[5]), U(p2[6]) },
-    };
+    const bool isDFM = bundle.count("proj_in.0.weight") != 0;
+    std::vector<Op> ops = isDFM ? programDFM() : programCCM();
+    std::printf("block: %s   (%zu ops)\n", isDFM ? "DFM" : "CCM/FFN", ops.size());
 
     // ---- device / queue / command list ----
     ComPtr<ID3D12Device> dev = CreateHighPerfDevice();
@@ -104,83 +144,124 @@ int main(int argc, char** argv)
         Check(dev->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso)), "CreateComputePipelineState");
         return pso;
     };
-    ComPtr<ID3D12PipelineState> psoConv = makePSO(L"conv2d.hlsl", L"conv2d_CS");
-    ComPtr<ID3D12PipelineState> psoGelu = makePSO(L"gelu.hlsl",  L"gelu_CS");
+    ComPtr<ID3D12PipelineState> psoConv   = makePSO(L"conv2d.hlsl", L"conv2d_CS");
+    ComPtr<ID3D12PipelineState> psoGelu   = makePSO(L"gelu.hlsl",   L"gelu_CS");
+    ComPtr<ID3D12PipelineState> psoMul     = makePSO(L"mul.hlsl",    L"mul_CS");
+    ComPtr<ID3D12PipelineState> psoConcat = makePSO(L"concat.hlsl", L"concat_CS");
 
-    // ---- allocate buffers: input + weights (upload SRVs), intermediates + output (default UAVs) ----
-    std::map<std::string, ComPtr<ID3D12Resource>> feat;    // feature buffers by name
-    std::map<std::string, Shape> shape;
-    std::map<std::string, D3D12_RESOURCE_STATES> state;    // current state of default buffers
+    // ---- resource bookkeeping ----
+    std::vector<ComPtr<ID3D12Resource>> alive;                    // keep every buffer alive
+    std::map<std::string, Value> vals;                            // feature values by name
+    std::map<ID3D12Resource*, D3D12_RESOURCE_STATES> rstate;      // DEFAULT-buffer current state
+    std::map<std::string, ComPtr<ID3D12Resource>> wbuf;          // weight/bias uploads
+    std::map<uint32_t, ComPtr<ID3D12Resource>> zeroBias;         // synthesized zero-bias by length
 
-    feat["input"] = UploadBuffer(dev.Get(), input.data.data(), input.data.size() * 4);
-    shape["input"] = { input.dims[0], input.dims[1], input.dims[2] };
+    auto VA = [](const Value& v) { return v.res->GetGPUVirtualAddress() + v.off; };
 
-    std::map<std::string, ComPtr<ID3D12Resource>> wbuf;    // weight/bias upload buffers
-    auto upload = [&](const std::string& name) {
-        if (!name.empty() && !wbuf.count(name))
+    // Input feature map (upload heap; always readable, so not tracked in rstate).
+    {
+        auto up = UploadBuffer(dev.Get(), input.data.data(), input.data.size() * 4);
+        alive.push_back(up);
+        vals["input"] = { up.Get(), 0, { input.dims[0], input.dims[1], input.dims[2] } };
+    }
+    auto uploadWB = [&](const std::string& name) {
+        if (name.empty() || wbuf.count(name)) return;
+        const Tensor& t = bundle.at(name);
+        wbuf[name] = UploadBuffer(dev.Get(), t.data.data(), t.data.size() * 4);
+    };
+    auto zeroBiasVA = [&](uint32_t n) {
+        if (!zeroBias.count(n))
         {
-            const Tensor& t = bundle.at(name);
-            wbuf[name] = UploadBuffer(dev.Get(), t.data.data(), t.data.size() * 4);
+            std::vector<float> z(n, 0.0f);
+            zeroBias[n] = UploadBuffer(dev.Get(), z.data(), size_t(n) * 4);
+        }
+        return zeroBias[n]->GetGPUVirtualAddress();
+    };
+    // Transition a DEFAULT buffer to be readable as an SRV (shared views transition once).
+    auto ensureSRV = [&](ID3D12Resource* r) {
+        auto it = rstate.find(r);
+        if (it != rstate.end() && it->second != D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
+        {
+            Transition(cl.Get(), r, it->second, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            it->second = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         }
     };
 
-    // Walk the graph: derive each op's output shape, allocate its (default, UAV) buffer.
-    for (const Op& op : ops)
-    {
-        Shape in = shape.at(op.in);
-        Shape out;
-        if (op.kind == "conv2d")
-        {
-            out.c = bundle.at(op.weight).dims[0];
-            out.h = (in.h + 2 * op.PadH - op.KH) / op.StrideH + 1;
-            out.w = (in.w + 2 * op.PadW - op.KW) / op.StrideW + 1;
-            upload(op.weight); upload(op.bias);
-        }
-        else // gelu (pointwise)
-        {
-            out = in;
-        }
-        shape[op.out] = out;
-        feat[op.out] = DefaultBuffer(dev.Get(), out.count() * 4, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        state[op.out] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    }
-
-    Shape outShape = shape.at("output");
-    const size_t outBytes = outShape.count() * 4;
-    ComPtr<ID3D12Resource> readback = ReadbackBuffer(dev.Get(), outBytes);
-
     // ---- record the graph ----
     cl->SetComputeRootSignature(rootSig.Get());
-    for (size_t i = 0; i < ops.size(); ++i)
+    for (const Op& op : ops)
     {
-        const Op& op = ops[i];
-        Shape in = shape.at(op.in), out = shape.at(op.out);
+        if (op.kind == "chunk")
+        {
+            // Free offset views: split the parent's channels into equal slices.
+            Value src = vals.at(op.ins[0]);
+            uint32_t n = uint32_t(op.outs.size());
+            uint32_t half = src.shape.c / n;
+            size_t plane = size_t(src.shape.h) * src.shape.w * 4;
+            for (uint32_t k = 0; k < n; ++k)
+                vals[op.outs[k]] = { src.res, src.off + size_t(k) * half * plane, { half, src.shape.h, src.shape.w } };
+            std::printf("  %-6s %-6s -> %ux (%u,%u,%u)\n", op.kind.c_str(), op.ins[0].c_str(),
+                        n, half, src.shape.h, src.shape.w);
+            continue;
+        }
 
-        cl->SetPipelineState(op.kind == "conv2d" ? psoConv.Get() : psoGelu.Get());
-        uint32_t consts[13] = { in.c, in.h, in.w, out.c,
+        for (const std::string& in : op.ins) ensureSRV(vals.at(in).res);
+
+        Value a = vals.at(op.ins[0]);
+        Shape out{};
+        ID3D12PipelineState* pso = nullptr;
+        if (op.kind == "conv2d")
+        {
+            uploadWB(op.weight); uploadWB(op.bias);
+            out.c = bundle.at(op.weight).dims[0];
+            out.h = (a.shape.h + 2 * op.PadH - op.KH) / op.StrideH + 1;
+            out.w = (a.shape.w + 2 * op.PadW - op.KW) / op.StrideW + 1;
+            pso = psoConv.Get();
+        }
+        else if (op.kind == "gelu") { out = a.shape; pso = psoGelu.Get(); }
+        else if (op.kind == "mul")  { out = a.shape; pso = psoMul.Get(); }
+        else if (op.kind == "concat")
+        {
+            Value b = vals.at(op.ins[1]);
+            out = { a.shape.c + b.shape.c, a.shape.h, a.shape.w };
+            pso = psoConcat.Get();
+        }
+
+        auto outBuf = DefaultBuffer(dev.Get(), out.count() * 4, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        alive.push_back(outBuf);
+        rstate[outBuf.Get()] = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        vals[op.outs[0]] = { outBuf.Get(), 0, out };
+
+        cl->SetPipelineState(pso);
+        uint32_t consts[13] = { a.shape.c, a.shape.h, a.shape.w, out.c,
                                 op.KH, op.KW, op.PadH, op.PadW, op.StrideH, op.StrideW, op.Groups,
                                 out.h, out.w };
         cl->SetComputeRoot32BitConstants(0, 13, consts, 0);
-        cl->SetComputeRootShaderResourceView(1, feat.at(op.in)->GetGPUVirtualAddress());
-        if (!op.weight.empty()) cl->SetComputeRootShaderResourceView(2, wbuf.at(op.weight)->GetGPUVirtualAddress());
-        if (!op.bias.empty())   cl->SetComputeRootShaderResourceView(3, wbuf.at(op.bias)->GetGPUVirtualAddress());
-        cl->SetComputeRootUnorderedAccessView(4, feat.at(op.out)->GetGPUVirtualAddress());
+        cl->SetComputeRootShaderResourceView(1, VA(a));                               // t0 = first input
+        if (op.kind == "conv2d")
+        {
+            cl->SetComputeRootShaderResourceView(2, wbuf.at(op.weight)->GetGPUVirtualAddress());
+            cl->SetComputeRootShaderResourceView(3, op.bias.empty() ? zeroBiasVA(out.c)
+                                                                    : wbuf.at(op.bias)->GetGPUVirtualAddress());
+        }
+        else if (op.kind == "mul" || op.kind == "concat")
+        {
+            cl->SetComputeRootShaderResourceView(2, VA(vals.at(op.ins[1])));          // t1 = second input
+        }
+        cl->SetComputeRootUnorderedAccessView(4, outBuf->GetGPUVirtualAddress());
         cl->Dispatch((out.w + 7) / 8, (out.h + 7) / 8, out.c);
 
-        // Hand this op's output to its consumer: SRV for the next op, or COPY_SOURCE for the
-        // final readback. (Linear chain: each intermediate is produced then read by the next op.)
-        bool last = (i + 1 == ops.size());
-        D3D12_RESOURCE_STATES nextState = last ? D3D12_RESOURCE_STATE_COPY_SOURCE
-                                               : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        Transition(cl.Get(), feat.at(op.out).Get(), state.at(op.out), nextState);
-        state[op.out] = nextState;
-
-        std::printf("  op[%zu] %-6s  in(%u,%u,%u) -> out(%u,%u,%u)%s\n", i, op.kind.c_str(),
-                    in.c, in.h, in.w, out.c, out.h, out.w,
-                    op.kind == "conv2d" ? (op.Groups > 1 ? "  (grouped)" : "") : "  (pointwise)");
+        std::printf("  %-6s %-8s -> %-8s (%u,%u,%u)%s\n", op.kind.c_str(), op.ins[0].c_str(),
+                    op.outs[0].c_str(), out.c, out.h, out.w,
+                    (op.kind == "conv2d" && op.Groups > 1) ? "  (grouped)" : "");
     }
 
-    cl->CopyResource(readback.Get(), feat.at("output").Get());
+    // ---- final output: UAV -> COPY_SOURCE, read back ----
+    Value outv = vals.at("output");
+    Transition(cl.Get(), outv.res, rstate.at(outv.res), D3D12_RESOURCE_STATE_COPY_SOURCE);
+    const size_t outBytes = outv.shape.count() * 4;
+    ComPtr<ID3D12Resource> readback = ReadbackBuffer(dev.Get(), outBytes);
+    cl->CopyResource(readback.Get(), outv.res);
     Check(cl->Close(), "Close");
 
     ID3D12CommandList* lists[] = { cl.Get() };
@@ -204,7 +285,7 @@ int main(int argc, char** argv)
         double d = std::fabs(double(gpu[i]) - double(golden.data[i]));
         if (d > maxAbs) maxAbs = d;
         sumAbs += d;
-        double a = std::fabs(golden.data[i]); if (a > gmax) gmax = a;
+        double av = std::fabs(golden.data[i]); if (av > gmax) gmax = av;
     }
     std::printf("golden[0..2] = %.5f %.5f %.5f   gpu[0..2] = %.5f %.5f %.5f\n",
         golden.data[0], golden.data[1], golden.data[2], gpu[0], gpu[1], gpu[2]);
