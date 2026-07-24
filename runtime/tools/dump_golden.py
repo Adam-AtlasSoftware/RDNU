@@ -502,7 +502,85 @@ def main():
     emit_int8_conv_bundle("int8_dfm_dw3x3.rdnut", "encoders.0.0.dfm.proj_in.0.weight",
                           golden_in["encoders.0.0.dfm.proj_in.0"][0], 3, 3, 1, 1, 1, 1, 36)  # depthwise g36
     emit_int8_conv_bundle("int8_down_s2.rdnut", "downs.0.weight",
-                          golden_in["downs.0"][0], 3, 3, 1, 1, 2, 2, 1)                   # strided s2
+                          golden_in["downs.0"][0], 3, 3, 1, 1, 2, 2, 1)
+
+    # ---- WHOLE-MODEL INT8: patch every quantized conv to W8A8 (shift convs stay FP), run a frame-0
+    # forward, and emit the int8 golden. The GPU programFullInt8 must reproduce this. ----
+    def i8_fwd(wi8, ws, a, b, stride, pad, groups):
+        wt = torch.from_numpy(np.ascontiguousarray(np.transpose(wi8, (0, 3, 1, 2)))).double()  # OHWI->OIHW
+        wsc = torch.from_numpy(ws).double().view(1, -1, 1, 1)
+        bt = torch.from_numpy(b).double().view(1, -1, 1, 1)
+
+        def fwd(x):
+            xq = torch.clamp(torch.floor(x.double() / a + 0.5), -127, 127)
+            acc = F.conv2d(xq, wt, None, stride, pad, groups=groups)   # exact int in float64
+            return (acc * wsc * float(a) + bt).float()
+        return fwd
+
+    def cyclefc_i8_fwd(m, wi8, ws, a, b):
+        wt = torch.from_numpy(np.ascontiguousarray(np.transpose(wi8, (0, 3, 1, 2)))).double()
+        wsc = torch.from_numpy(ws).double().view(1, -1, 1, 1)
+        bt = torch.from_numpy(b).double().view(1, -1, 1, 1)
+        py, px = m.kernel_size[0] // 2, m.kernel_size[1] // 2
+
+        def fwd(inp):
+            sh = F.conv2d(inp, m.shift_weight, padding=(py, px), groups=m.in_channels)  # FP shift
+            xq = torch.clamp(torch.floor(sh.double() / a + 0.5), -127, 127)
+            acc = F.conv2d(xq, wt, None)                                                # int8 1x1
+            return (acc * wsc * float(a) + bt).float()
+        return fwd
+
+    for P, m in list(mods.items()):
+        wn = P + ".weight"
+        if wn in ents8 and ents8[wn]["is_q"]:
+            wi8, ws, a, b = int8_layer(ents8, blob8, wn)
+            if isinstance(m, torch.nn.Conv2d):
+                m.forward = i8_fwd(wi8, ws, a, b, m.stride, m.padding, m.groups)
+            elif type(m).__name__ == "CycleFC":
+                m.forward = cyclefc_i8_fwd(m, wi8, ws, a, b)
+
+    gi8 = {}
+    hs8 = []
+    for name, mod in model.named_modules():
+        if name == "":
+            continue
+
+        def i8_hook(mm, i, o, nm=name):   # must return None (a return value would replace the output)
+            if isinstance(o, torch.Tensor) and nm not in gi8:
+                gi8[nm] = o.detach().float().cpu().numpy()
+
+        hs8.append(mod.register_forward_hook(i8_hook))
+    with torch.no_grad():
+        out_i8 = model(inp)
+    for h in hs8:
+        h.remove()
+
+    def emit_full_int8_bundle(fname):
+        t = {}
+        for wn, e in ents8.items():
+            if e["is_q"]:
+                wi8, ws, a, b = int8_layer(ents8, blob8, wn)
+                t[wn + ".w"] = np.ascontiguousarray(wi8)
+                t[wn + ".scale"] = ws
+                t[wn + ".ascale"] = np.array([a], np.float32)
+                t[wn + ".bias"] = b
+            elif wn in ok:                      # non-quantized (shift buffers, skip_alphas) stay FP
+                t[wn] = ok[wn].numpy()
+        t["image"] = golden_f_in["first_conv"][0]
+        t["g"] = golden_f_in1["decoders.1"][0]
+        t["depth"] = golden_f_in2["decoders.1"][0]
+        t["golden_out"] = out_i8[0, 0].detach().numpy()
+        for vn, mod in {"x0": "first_conv", "enc0": "encoders.0.0", "down0": "downs.0",
+                        "enc1": "encoders.1.0", "mid_e": "middle_encoders.0",
+                        "mid_d": "middle_decoders", "dec0": "decoders.0", "dec1": "decoders.1"}.items():
+            if mod in gi8:
+                t["chk." + vn] = gi8[mod][0]
+        write_rdnut(os.path.join(OUT_DIR, fname), t)
+        q = sum(1 for e in ents8.values() if e["is_q"])
+        print(f"  bundle {fname:<24} {'<whole model INT8, frame0>':<28} "
+              f"image{tuple(t['image'].shape)} -> out{tuple(t['golden_out'].shape)}  ({q} int8 convs)")
+
+    emit_full_int8_bundle("full_model_int8.rdnut")                   # strided s2
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "

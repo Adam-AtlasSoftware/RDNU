@@ -122,6 +122,8 @@ if(WIN32)
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_ffn_1x1.rdnut"
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_dfm_dw3x3.rdnut"
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_down_s2.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== WHOLE MODEL INT8 (W8A8 process_forward vs torch int8 ref) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/full_model_int8.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
         COMMENT "Running the RDNU block engine on all composite blocks vs golden")

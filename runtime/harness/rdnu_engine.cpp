@@ -41,8 +41,11 @@ struct Op
     uint32_t KH, KW, PadH, PadW, StrideH, StrideW, Groups;
 };
 
-Op conv(std::string in, std::string out, std::string w, std::string b,
-        uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw, uint32_t g)
+// When true, conv() emits INT8 (W8A8) ops instead of FP32; used to build the whole-model int8 graph.
+bool gInt8 = false;
+
+Op convFp(std::string in, std::string out, std::string w, std::string b,
+          uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw, uint32_t g)
 {
     return Op{ "conv2d", { in }, { out }, w, b, kh, kw, ph, pw, sh, sw, g };
 }
@@ -52,6 +55,15 @@ Op convI8(std::string in, std::string out, std::string wbase,
           uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw, uint32_t g)
 {
     return Op{ "conv2d_int8", { in }, { out }, wbase, "", kh, kw, ph, pw, sh, sw, g };
+}
+
+// Default conv: INT8 when gInt8 (the quantized layers), else FP32. Shift convs use convFp directly
+// (they are is_quantized=false in the exported model and stay FP even in the int8 graph).
+Op conv(std::string in, std::string out, std::string w, std::string b,
+        uint32_t kh, uint32_t kw, uint32_t ph, uint32_t pw, uint32_t sh, uint32_t sw, uint32_t g)
+{
+    return gInt8 ? convI8(in, out, w, kh, kw, ph, pw, sh, sw, g)
+                 : convFp(in, out, w, b, kh, kw, ph, pw, sh, sw, g);
 }
 
 // Sub-graphs are appended with a `p` prefix on their weight-bundle keys AND intermediate
@@ -65,9 +77,9 @@ void appendDFM(std::vector<Op>& ops, const std::string& p, const std::string& in
     ops.push_back(conv(in,       n("pi0"), n("proj_in.0.weight"), n("proj_in.0.bias"), 3, 3, 1, 1, 1, 1, 0)); // dw3x3 (g=dim) dim->2dim
     ops.push_back(conv(n("pi0"), n("pi"),  n("proj_in.1.weight"), n("proj_in.1.bias"), 1, 1, 0, 0, 1, 1, 1));  // 1x1 2dim->2dim
     ops.push_back(Op{ "chunk", { n("pi") }, { n("g"), n("c") } });                                             // -> g(dim), c(dim)
-    ops.push_back(conv(n("c"),   n("hsh"), n("mlp_h.shift_weight"), "", 1, 7, 0, 3, 1, 1, 0));                 // 1x7 shift (g=dim, no bias)
+    ops.push_back(convFp(n("c"), n("hsh"), n("mlp_h.shift_weight"), "", 1, 7, 0, 3, 1, 1, 0));                 // 1x7 shift (FP, no bias)
     ops.push_back(conv(n("hsh"), n("hc"),  n("mlp_h.weight"), n("mlp_h.bias"), 1, 1, 0, 0, 1, 1, 1));          // 1x1 dim->dim
-    ops.push_back(conv(n("hc"),  n("wsh"), n("mlp_w.shift_weight"), "", 7, 1, 3, 0, 1, 1, 0));                 // 7x1 shift (g=dim, no bias)
+    ops.push_back(convFp(n("hc"), n("wsh"), n("mlp_w.shift_weight"), "", 7, 1, 3, 0, 1, 1, 0));                // 7x1 shift (FP, no bias)
     ops.push_back(conv(n("wsh"), n("c2"),  n("mlp_w.weight"), n("mlp_w.bias"), 1, 1, 0, 0, 1, 1, 1));          // 1x1 36->36
     ops.push_back(Op{ "concat", { in, n("c2") }, { n("cat") } });                                              // cat[x, c2] -> 72
     ops.push_back(conv(n("cat"), n("merged"), n("merge.weight"), n("merge.bias"), 1, 1, 0, 0, 1, 1, 1));       // 1x1 72->36
@@ -214,6 +226,16 @@ std::vector<Op> programFull()
     appendFinalUpSample(ops, "UpSample.", "xres", "output");
     return ops;
 }
+
+// Whole model in INT8 (W8A8): identical graph to programFull, but every quantized conv becomes a
+// conv2d_int8 op (shift convs stay FP). Non-conv ops (gelu/resize/attention/...) remain FP32.
+std::vector<Op> programFullInt8()
+{
+    gInt8 = true;
+    std::vector<Op> ops = programFull();
+    gInt8 = false;
+    return ops;
+}
 }
 
 int main(int argc, char** argv)
@@ -238,6 +260,7 @@ int main(int argc, char** argv)
     // Pick the block program from which weights the bundle carries.
     std::vector<Op> ops; const char* blockName;
     if (bundle.count("i8p")) { ops = programConvInt8(bundle.at("i8p").data); blockName = "ConvInt8"; }
+    else if (bundle.count("first_conv.weight.w")) { ops = programFullInt8(); blockName = "WholeModelI8"; }
     else if (bundle.count("first_conv.weight")) { ops = programFull(); blockName = "WholeModel"; }
     else if (bundle.count("hfb.conv_g.weight")) { ops = programDecodeLayer(); blockName = "DecodeLayer"; }
     else if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
