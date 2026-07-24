@@ -33,6 +33,30 @@ if(RDNU_BUILD_TESTS AND WIN32)
 endif()
 
 # ---------------------------------------------------------------------------
+# Standalone DX12 validation harness (rdnu_harness): runs a single RDNU layer on
+# the GPU and compares it to the PyTorch golden (runtime/tools/golden/*.rdnut).
+# A real CMake-built executable (no Cauldron) for layer-by-layer numerical bring-up.
+#   * target 'rdnu_harness' -> builds the harness
+#   * target 'run_harness'  -> builds it, then runs it on the first_conv golden bundle
+# ---------------------------------------------------------------------------
+if(WIN32)
+    set(RDNU_FFX_BIN "${RDNU_SDK_DIR}/Kits/Cauldron2/dx12/vcpkg_installed/x64-windows/x64-windows/bin")
+    add_executable(rdnu_harness harness/rdnu_harness.cpp)
+    target_link_libraries(rdnu_harness PRIVATE d3d12 dxgi dxguid)
+    # DXC (AMD build, wave-matrix capable) + dxil + the shader, staged next to the exe.
+    add_custom_command(TARGET rdnu_harness POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxcompiler.dll" "$<TARGET_FILE_DIR:rdnu_harness>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RDNU_FFX_BIN}/dxil.dll"       "$<TARGET_FILE_DIR:rdnu_harness>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/first_conv.hlsl" "$<TARGET_FILE_DIR:rdnu_harness>"
+        VERBATIM)
+    add_custom_target(run_harness
+        COMMAND "$<TARGET_FILE:rdnu_harness>" "${RDNU_ROOT}/tools/golden/first_conv.rdnut"
+        DEPENDS rdnu_harness
+        USES_TERMINAL
+        COMMENT "Running rdnu_harness on the first_conv golden bundle")
+endif()
+
+# ---------------------------------------------------------------------------
 # HLSL shader validation (best-effort). Runs DXC over each compute shader and
 # reports pass/fail without failing the build (the WMMA shader is WIP and needs
 # AMD wave-matrix intrinsics, so it is expected to fail until finished).

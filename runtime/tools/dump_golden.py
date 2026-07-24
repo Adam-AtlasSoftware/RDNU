@@ -115,6 +115,27 @@ def load_fp16_state_dict():
     return sd
 
 
+def write_rdnut(path, tensors):
+    """Write a simple self-contained tensor bundle the DX12 harness can read.
+
+    Format (little-endian): 'RDNT', u32 version=1, u32 count, then per tensor:
+    u32 name_len, name bytes, u32 ndim, u32 dims[ndim], float32 data[prod(dims)].
+    """
+    import struct
+    with open(path, "wb") as f:
+        f.write(b"RDNT")
+        f.write(struct.pack("<II", 1, len(tensors)))
+        for name, arr in tensors.items():
+            arr = np.ascontiguousarray(np.asarray(arr, dtype=np.float32))
+            nb = name.encode("utf-8")
+            f.write(struct.pack("<I", len(nb)))
+            f.write(nb)
+            f.write(struct.pack("<I", arr.ndim))
+            for d in arr.shape:
+                f.write(struct.pack("<I", int(d)))
+            f.write(arr.tobytes())
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", default=None,
@@ -194,6 +215,16 @@ def main():
     save["output"] = out.detach().numpy()
     save.update({f"act.{k}": v for k, v in golden.items()})
     np.savez(os.path.join(OUT_DIR, "golden.npz"), **save)
+
+    # Self-contained validation bundle for the DX12 harness (first_conv).
+    # golden['first_conv'] is the last frame processed; pair it with that frame's image.
+    fi = args.frames - 1
+    write_rdnut(os.path.join(OUT_DIR, "first_conv.rdnut"), {
+        "input": inp["Image"][0, fi].numpy(),        # (3, H, W)
+        "weight": ok["first_conv.weight"].numpy(),   # (36, 3, 3, 3) OIHW
+        "bias": ok["first_conv.bias"].numpy(),       # (36,)
+        "golden_out": golden["first_conv"][0],       # (36, H, W)
+    })
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "
