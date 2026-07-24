@@ -94,6 +94,7 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/ctr_apply.hlsl"      "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/resize.hlsl"        "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/pixelshuffle.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/axpy.hlsl"        "$<TARGET_FILE_DIR:rdnu_engine>"
         VERBATIM)
     add_custom_target(run_engine
         COMMAND ${CMAKE_COMMAND} -E echo "== CCM/FFN block  (conv3x3 -> GELU -> conv1x1) =="
@@ -112,6 +113,8 @@ if(WIN32)
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/upsample_block.rdnut"
         COMMAND ${CMAKE_COMMAND} -E echo "== UpSample head  (conv 36->12 -> PixelShuffle(2)) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/upsample_head.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== WHOLE MODEL    (process_forward, frame0) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/full_model.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
         COMMENT "Running the RDNU block engine on all composite blocks vs golden")

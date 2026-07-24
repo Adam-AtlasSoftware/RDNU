@@ -55,12 +55,12 @@ Op conv(std::string in, std::string out, std::string w, std::string b,
 void appendDFM(std::vector<Op>& ops, const std::string& p, const std::string& in, const std::string& out)
 {
     auto n = [&](const std::string& s) { return p + s; };  // prefixed name (weight key or intermediate)
-    ops.push_back(conv(in,       n("pi0"), n("proj_in.0.weight"), n("proj_in.0.bias"), 3, 3, 1, 1, 1, 1, 36)); // dw3x3 g36 36->72
-    ops.push_back(conv(n("pi0"), n("pi"),  n("proj_in.1.weight"), n("proj_in.1.bias"), 1, 1, 0, 0, 1, 1, 1));  // 1x1 72->72
-    ops.push_back(Op{ "chunk", { n("pi") }, { n("g"), n("c") } });                                             // -> g(36), c(36)
-    ops.push_back(conv(n("c"),   n("hsh"), n("mlp_h.shift_weight"), "", 1, 7, 0, 3, 1, 1, 36));                // 1x7 shift g36 (no bias)
-    ops.push_back(conv(n("hsh"), n("hc"),  n("mlp_h.weight"), n("mlp_h.bias"), 1, 1, 0, 0, 1, 1, 1));          // 1x1 36->36
-    ops.push_back(conv(n("hc"),  n("wsh"), n("mlp_w.shift_weight"), "", 7, 1, 3, 0, 1, 1, 36));                // 7x1 shift g36 (no bias)
+    ops.push_back(conv(in,       n("pi0"), n("proj_in.0.weight"), n("proj_in.0.bias"), 3, 3, 1, 1, 1, 1, 0)); // dw3x3 (g=dim) dim->2dim
+    ops.push_back(conv(n("pi0"), n("pi"),  n("proj_in.1.weight"), n("proj_in.1.bias"), 1, 1, 0, 0, 1, 1, 1));  // 1x1 2dim->2dim
+    ops.push_back(Op{ "chunk", { n("pi") }, { n("g"), n("c") } });                                             // -> g(dim), c(dim)
+    ops.push_back(conv(n("c"),   n("hsh"), n("mlp_h.shift_weight"), "", 1, 7, 0, 3, 1, 1, 0));                 // 1x7 shift (g=dim, no bias)
+    ops.push_back(conv(n("hsh"), n("hc"),  n("mlp_h.weight"), n("mlp_h.bias"), 1, 1, 0, 0, 1, 1, 1));          // 1x1 dim->dim
+    ops.push_back(conv(n("hc"),  n("wsh"), n("mlp_w.shift_weight"), "", 7, 1, 3, 0, 1, 1, 0));                 // 7x1 shift (g=dim, no bias)
     ops.push_back(conv(n("wsh"), n("c2"),  n("mlp_w.weight"), n("mlp_w.bias"), 1, 1, 0, 0, 1, 1, 1));          // 1x1 36->36
     ops.push_back(Op{ "concat", { in, n("c2") }, { n("cat") } });                                              // cat[x, c2] -> 72
     ops.push_back(conv(n("cat"), n("merged"), n("merge.weight"), n("merge.bias"), 1, 1, 0, 0, 1, 1, 1));       // 1x1 72->36
@@ -84,7 +84,8 @@ void appendCCM(std::vector<Op>& ops, const std::string& p, const std::string& in
 void appendHFB(std::vector<Op>& ops, const std::string& p, const std::string& xin, const std::string& gin, const std::string& out)
 {
     auto n = [&](const std::string& s) { return p + s; };
-    ops.push_back(conv(gin, n("x2"), n("conv_g.weight"), n("conv_g.bias"), 3, 3, 1, 1, 1, 1, 1)); // 6->dim
+    ops.push_back(Op{ "resize", { gin, xin }, { n("g_rs") } });                                  // g -> x size (bilinear)
+    ops.push_back(conv(n("g_rs"), n("x2"), n("conv_g.weight"), n("conv_g.bias"), 3, 3, 1, 1, 1, 1, 1)); // 6->dim
     ops.push_back(conv(xin, n("x1"), n("conv_x.weight"), n("conv_x.bias"), 3, 3, 1, 1, 1, 1, 1)); // dim->dim
     ops.push_back(Op{ "gelu", { n("x2") }, { n("gx2") } });
     ops.push_back(Op{ "gelu", { n("x1") }, { n("gx1") } });
@@ -102,6 +103,7 @@ void appendCTR(std::vector<Op>& ops, const std::string& p, const std::string& xi
 {
     auto n = [&](const std::string& s) { return p + s; };
     const uint32_t H = 4;  // num_head
+    ops.push_back(Op{ "resize", { depthin, xin }, { n("d_rs") } });   // depth -> x size (bilinear)
     ops.push_back(conv(xin, n("tq0"), n("to_q.0.weight"), n("to_q.0.bias"), 1, 1, 0, 0, 1, 1, 1));    // 1x1 dim->2dim
     ops.push_back(conv(n("tq0"), n("tq"), n("to_q.1.weight"), n("to_q.1.bias"), 3, 3, 1, 1, 1, 1, 0)); // dw3x3
     ops.push_back(Op{ "chunk", { n("tq") }, { n("q1"), n("q2") } });
@@ -114,7 +116,7 @@ void appendCTR(std::vector<Op>& ops, const std::string& p, const std::string& xi
     ops.push_back(Op{ "softmax", { n("attn") }, { n("attnp") }, "", "", 0, 0, 0, 0, 0, 0, H });
     ops.push_back(Op{ "apply", { n("attnp"), n("v") }, { n("att") }, "", "", 0, 0, 0, 0, 0, 0, H });
     ops.push_back(Op{ "concat", { n("att"), n("q2") }, { n("cat1") } });                 // out + q2
-    ops.push_back(Op{ "concat", { n("cat1"), depthin }, { n("cat2") } });                // + depth
+    ops.push_back(Op{ "concat", { n("cat1"), n("d_rs") }, { n("cat2") } });              // + depth
     ops.push_back(conv(n("cat2"), out, n("proj_out.weight"), n("proj_out.bias"), 1, 1, 0, 0, 1, 1, 1)); // 1x1 (2dim+1)->dim
 }
 
@@ -142,27 +144,59 @@ std::vector<Op> programUpsample() { std::vector<Op> ops; appendUpsample(ops, "",
 std::vector<Op> programFinalUpSample() { std::vector<Op> ops; appendFinalUpSample(ops, "UpSample.", "input", "output"); return ops; }
 
 // EncodeLayer: x = dfm(x) + x; x = ffn(x) + x. (encoders.*.* in rdg_arch.py)
-std::vector<Op> programEncodeLayer()
+void appendEncodeLayer(std::vector<Op>& ops, const std::string& p, const std::string& in, const std::string& out)
 {
-    std::vector<Op> ops;
-    appendDFM(ops, "dfm.", "input", "dfm_out");
-    ops.push_back(Op{ "add", { "input", "dfm_out" }, { "x1" } });   // residual
-    appendCCM(ops, "ffn.", "x1", "ffn_out");
-    ops.push_back(Op{ "add", { "x1", "ffn_out" }, { "output" } });  // residual
-    return ops;
+    auto n = [&](const std::string& s) { return p + s; };
+    appendDFM(ops, p + "dfm.", in, n("dfm_out"));
+    ops.push_back(Op{ "add", { in, n("dfm_out") }, { n("e1") } });           // residual
+    appendCCM(ops, p + "ffn.", n("e1"), n("ffn_out"));
+    ops.push_back(Op{ "add", { n("e1"), n("ffn_out") }, { out } });          // residual
 }
 
 // DecodeLayer: x = hfb(x, g) + x; x = ctr(x, d) + x; x = ffn(x) + x. (decoders.*/middle_decoders)
 // Frame-0 CTR (identity warp). g/depth are block-level feature inputs.
-std::vector<Op> programDecodeLayer()
+void appendDecodeLayer(std::vector<Op>& ops, const std::string& p, const std::string& xin,
+                       const std::string& gin, const std::string& din, const std::string& out)
+{
+    auto n = [&](const std::string& s) { return p + s; };
+    appendHFB(ops, p + "hfb.", xin, gin, n("hfb_out"));
+    ops.push_back(Op{ "add", { xin, n("hfb_out") }, { n("d1") } });          // residual
+    appendCTR(ops, p + "ctr.", n("d1"), din, n("ctr_out"));
+    ops.push_back(Op{ "add", { n("d1"), n("ctr_out") }, { n("d2") } });      // residual
+    appendCCM(ops, p + "ffn.", n("d2"), n("ffn_out"));
+    ops.push_back(Op{ "add", { n("d2"), n("ffn_out") }, { out } });          // residual
+}
+
+std::vector<Op> programEncodeLayer() { std::vector<Op> ops; appendEncodeLayer(ops, "", "input", "output"); return ops; }
+std::vector<Op> programDecodeLayer() { std::vector<Op> ops; appendDecodeLayer(ops, "", "input", "g", "depth", "output"); return ops; }
+
+// Whole single-frame network — RDG.process_forward, frame-0 (pre_h=None => identity warps, m=None).
+// Config pinned by the weights: num_feat=36, enc/dec [1,1], middle 1, scale 2. External inputs:
+// image (3ch), g (6ch = normal+brdf), depth (1ch); weights keyed by their full state_dict names.
+std::vector<Op> programFull()
 {
     std::vector<Op> ops;
-    appendHFB(ops, "hfb.", "input", "g", "hfb_out");
-    ops.push_back(Op{ "add", { "input", "hfb_out" }, { "x1" } });   // residual
-    appendCTR(ops, "ctr.", "x1", "depth", "ctr_out");
-    ops.push_back(Op{ "add", { "x1", "ctr_out" }, { "x2" } });      // residual
-    appendCCM(ops, "ffn.", "x2", "ffn_out");
-    ops.push_back(Op{ "add", { "x2", "ffn_out" }, { "output" } });  // residual
+    ops.push_back(conv("image", "x0", "first_conv.weight", "first_conv.bias", 3, 3, 1, 1, 1, 1, 1)); // 3->36, res=x0
+    // encoder 0 (36) -> down -> 72@32
+    appendEncodeLayer(ops, "encoders.0.0.", "x0", "enc0");
+    ops.push_back(conv("enc0", "down0", "downs.0.weight", "downs.0.bias", 3, 3, 1, 1, 2, 2, 1));      // strided
+    // encoder 1 (72) -> down -> 108@16
+    appendEncodeLayer(ops, "encoders.1.0.", "down0", "enc1");
+    ops.push_back(conv("enc1", "down1", "downs.1.weight", "downs.1.bias", 3, 3, 1, 1, 2, 2, 1));
+    // middle enc + dec (108@16)
+    appendEncodeLayer(ops, "middle_encoders.0.", "down1", "mid_e");
+    appendDecodeLayer(ops, "middle_decoders.", "mid_e", "g", "depth", "mid_d");
+    // decoder 0: up 108->72@32, skip += alpha_72*enc1, decode
+    appendUpsample(ops, "ups.0.", "mid_d", "up0");
+    ops.push_back(Op{ "axpy", { "up0", "enc1" }, { "dm0" }, "skip_alphas.1" });
+    appendDecodeLayer(ops, "decoders.0.", "dm0", "g", "depth", "dec0");
+    // decoder 1: up 72->36@64, skip += alpha_36*enc0, decode
+    appendUpsample(ops, "ups.1.", "dec0", "up1");
+    ops.push_back(Op{ "axpy", { "up1", "enc0" }, { "dm1" }, "skip_alphas.0" });
+    appendDecodeLayer(ops, "decoders.1.", "dm1", "g", "depth", "dec1");
+    // x += res, then the UpSample head (conv + PixelShuffle) -> 3@128
+    ops.push_back(Op{ "add", { "dec1", "x0" }, { "xres" } });
+    appendFinalUpSample(ops, "UpSample.", "xres", "output");
     return ops;
 }
 }
@@ -188,7 +222,8 @@ int main(int argc, char** argv)
 
     // Pick the block program from which weights the bundle carries.
     std::vector<Op> ops; const char* blockName;
-    if (bundle.count("hfb.conv_g.weight")) { ops = programDecodeLayer(); blockName = "DecodeLayer"; }
+    if (bundle.count("first_conv.weight")) { ops = programFull(); blockName = "WholeModel"; }
+    else if (bundle.count("hfb.conv_g.weight")) { ops = programDecodeLayer(); blockName = "DecodeLayer"; }
     else if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
     else if (bundle.count("conv_g.weight")) { ops = programHFB(); blockName = "HFB"; }
     else if (bundle.count("to_q.0.weight")) { ops = programCTR(); blockName = "CTR"; }
@@ -253,6 +288,7 @@ int main(int argc, char** argv)
     ComPtr<ID3D12PipelineState> psoApply   = makePSO(L"ctr_apply.hlsl",      L"ctr_apply_CS");
     ComPtr<ID3D12PipelineState> psoResize  = makePSO(L"resize.hlsl",         L"resize_CS");
     ComPtr<ID3D12PipelineState> psoPShuf   = makePSO(L"pixelshuffle.hlsl",   L"pixelshuffle_CS");
+    ComPtr<ID3D12PipelineState> psoAxpy    = makePSO(L"axpy.hlsl",           L"axpy_CS");
 
     // ---- resource bookkeeping ----
     std::vector<ComPtr<ID3D12Resource>> alive;                    // keep every buffer alive
@@ -341,13 +377,14 @@ int main(int argc, char** argv)
             cst[8] = op.StrideH; cst[9] = op.StrideW; cst[10] = groups; cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
-        else if (op.kind == "gelu" || op.kind == "mul" || op.kind == "add" || op.kind == "concat")
+        else if (op.kind == "gelu" || op.kind == "mul" || op.kind == "add" || op.kind == "concat" || op.kind == "axpy")
         {
             twoInput = (op.kind != "gelu");
             if (op.kind == "concat") { Value b = vals.at(op.ins[1]); out = { a.shape.c + b.shape.c, a.shape.h, a.shape.w }; }
             else out = a.shape;
             pso = op.kind == "gelu" ? psoGelu.Get() : op.kind == "mul" ? psoMul.Get()
-                : op.kind == "add" ? psoAdd.Get() : psoConcat.Get();
+                : op.kind == "add" ? psoAdd.Get() : op.kind == "axpy" ? psoAxpy.Get() : psoConcat.Get();
+            if (op.kind == "axpy") uploadWB(op.weight);   // per-channel alpha on t2
             cst[0] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = out.c;
             cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
@@ -416,12 +453,32 @@ int main(int argc, char** argv)
         else if (twoInput)
         {
             cl->SetComputeRootShaderResourceView(2, VA(vals.at(op.ins[1])));         // t1 = second input
+            if (op.kind == "axpy")                                                   // t2 = per-channel alpha
+                cl->SetComputeRootShaderResourceView(3, wbuf.at(op.weight)->GetGPUVirtualAddress());
         }
         cl->SetComputeRootUnorderedAccessView(4, outBuf->GetGPUVirtualAddress());
         cl->Dispatch(gx, gy, gz);
 
         std::printf("  %-8s %-9s -> %-9s (%u,%u,%u)\n", op.kind.c_str(), op.ins[0].c_str(),
                     op.outs[0].c_str(), out.c, out.h, out.w);
+    }
+
+    // ---- optional debug checkpoints: bundle tensors "chk.<value>" are compared against the engine's
+    // intermediate <value>, to localize a divergence in a large graph. Read back after execution. ----
+    struct Chk { std::string name; ComPtr<ID3D12Resource> rb; const Tensor* gold; size_t bytes; };
+    std::vector<Chk> chks;
+    for (const auto& kv : bundle)
+    {
+        if (kv.first.rfind("chk.", 0) != 0) continue;
+        auto it = vals.find(kv.first.substr(4));
+        if (it == vals.end()) continue;
+        Value v = it->second;
+        Transition(cl.Get(), v.res, rstate.at(v.res), D3D12_RESOURCE_STATE_COPY_SOURCE);
+        rstate[v.res] = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        size_t bytes = v.shape.count() * 4;
+        auto rb = ReadbackBuffer(dev.Get(), bytes);
+        cl->CopyBufferRegion(rb.Get(), 0, v.res, v.off, bytes);
+        chks.push_back({ kv.first.substr(4), rb, &kv.second, bytes });
     }
 
     // ---- final output: UAV -> COPY_SOURCE, read back ----
@@ -442,6 +499,17 @@ int main(int argc, char** argv)
     fence->SetEventOnCompletion(1, ev);
     WaitForSingleObject(ev, INFINITE);
     CloseHandle(ev);
+
+    // ---- report checkpoints (first divergence localizes the bug) ----
+    for (Chk& c : chks)
+    {
+        float* p = nullptr; D3D12_RANGE r{ 0, c.bytes };
+        Check(c.rb->Map(0, &r, reinterpret_cast<void**>(&p)), "Map(chk)");
+        double mx = 0.0; size_t n = c.gold->count();
+        for (size_t i = 0; i < n; ++i) { double d = std::fabs(double(p[i]) - double(c.gold->data[i])); if (d > mx) mx = d; }
+        c.rb->Unmap(0, nullptr);
+        std::printf("  chk %-10s max|err| = %-12.5g %s\n", c.name.c_str(), mx, mx < 1e-2 ? "ok" : "<< DIVERGE");
+    }
 
     // ---- compare block output vs golden ----
     float* gpu = nullptr; D3D12_RANGE rng{ 0, outBytes };

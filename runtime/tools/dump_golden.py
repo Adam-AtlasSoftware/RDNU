@@ -361,6 +361,25 @@ def main():
         write_rdnut(os.path.join(OUT_DIR, fname), {"input": x, "golden_out": y, **tensors})
         print(f"  bundle {fname:<24} {name:<28} in{tuple(x.shape)} -> out{tuple(y.shape)} ({desc})")
 
+    def emit_full_bundle(fname):
+        # Whole single-frame network (frame 0). Every weight (all 131 tensors incl. shift buffers &
+        # skip_alphas) keyed by its full state_dict name, plus the frame-0 feature inputs, plus the
+        # frame-0 golden output. The engine's programFull references these names directly.
+        t = {k: v.numpy() for k, v in ok.items()}
+        t["image"]      = golden_f_in["first_conv"][0]     # first_conv input, frame 0 (3,64,64)
+        t["g"]          = golden_f_in1["decoders.1"][0]     # g-buffer (normal+brdf), frame 0 (6,64,64)
+        t["depth"]      = golden_f_in2["decoders.1"][0]     # depth, frame 0 (1,64,64)
+        t["golden_out"] = out[0, 0].detach().numpy()        # model output, frame 0 (3,128,128)
+        # debug checkpoints: engine intermediate name -> module whose frame-0 output it should match
+        for vn, mod in {"x0": "first_conv", "enc0": "encoders.0.0", "down0": "downs.0",
+                        "enc1": "encoders.1.0", "down1": "downs.1", "mid_e": "middle_encoders.0",
+                        "mid_d": "middle_decoders", "dec0": "decoders.0", "dec1": "decoders.1"}.items():
+            if mod in golden_f:
+                t["chk." + vn] = golden_f[mod][0]
+        write_rdnut(os.path.join(OUT_DIR, fname), t)
+        print(f"  bundle {fname:<24} {'<whole model, frame0>':<28} "
+              f"image{tuple(t['image'].shape)} -> out{tuple(t['golden_out'].shape)}  ({len(ok)} weights)")
+
     print("wrote layer bundles:")
     emit_conv_bundle("first_conv.rdnut", "first_conv")                  # 3x3, 3->36
     emit_conv_bundle("ffn_conv3x3.rdnut", "encoders.0.0.ffn.fn.0")      # 3x3, 36->72
@@ -401,6 +420,7 @@ def main():
                        "depth": golden_f_in2["decoders.1"][0]},  # DecodeLayer input[2] (depth)
                       "DecodeLayer (frame0): hfb(x,g)+x -> ctr(x,d)+x -> ffn(x)+x",
                       first=True)
+    emit_full_bundle("full_model.rdnut")                     # whole single-frame network (frame 0)
 
     fc = golden.get("first_conv")
     print(f"\nForward OK. output {tuple(out.shape)}  "
