@@ -47,33 +47,49 @@ Op conv(std::string in, std::string out, std::string w, std::string b,
     return Op{ "conv2d", { in }, { out }, w, b, kh, kw, ph, pw, sh, sw, g };
 }
 
-// CCM/FFN: conv3x3 -> GELU -> conv1x1.
-std::vector<Op> programCCM()
-{
-    return {
-        conv("input", "h0", "fn.0.weight", "fn.0.bias", 3, 3, 1, 1, 1, 1, 1),
-        Op{ "gelu", { "h0" }, { "h1" } },
-        conv("h1", "output", "fn.2.weight", "fn.2.bias", 1, 1, 0, 0, 1, 1, 1),
-    };
-}
+// Sub-graphs are appended with a `p` prefix on their weight-bundle keys AND intermediate
+// value names, and explicit `in`/`out` feature names, so a block can be reused standalone
+// or composed inside a larger block (EncodeLayer, and later DecodeLayer) without collisions.
 
 // DFM (dim=36, hidden=72). Mirrors DFM.forward in rdg_block.py.
-std::vector<Op> programDFM()
+void appendDFM(std::vector<Op>& ops, const std::string& p, const std::string& in, const std::string& out)
 {
-    return {
-        conv("input", "pi0", "proj_in.0.weight", "proj_in.0.bias", 3, 3, 1, 1, 1, 1, 36), // dw3x3 g36 36->72
-        conv("pi0", "pi", "proj_in.1.weight", "proj_in.1.bias", 1, 1, 0, 0, 1, 1, 1),      // 1x1 72->72
-        Op{ "chunk", { "pi" }, { "g", "c" } },                                             // -> g(36), c(36)
-        conv("c", "hsh", "mlp_h.shift_weight", "", 1, 7, 0, 3, 1, 1, 36),                  // 1x7 shift g36 (no bias)
-        conv("hsh", "hc", "mlp_h.weight", "mlp_h.bias", 1, 1, 0, 0, 1, 1, 1),              // 1x1 36->36
-        conv("hc", "wsh", "mlp_w.shift_weight", "", 7, 1, 3, 0, 1, 1, 36),                 // 7x1 shift g36 (no bias)
-        conv("wsh", "c2", "mlp_w.weight", "mlp_w.bias", 1, 1, 0, 0, 1, 1, 1),              // 1x1 36->36
-        Op{ "concat", { "input", "c2" }, { "cat" } },                                      // cat[x, c2] -> 72
-        conv("cat", "merged", "merge.weight", "merge.bias", 1, 1, 0, 0, 1, 1, 1),          // 1x1 72->36
-        Op{ "gelu", { "g" }, { "gact" } },                                                 // gelu(g)
-        Op{ "mul", { "gact", "merged" }, { "gated" } },                                    // gelu(g) * merged
-        conv("gated", "output", "proj_out.weight", "proj_out.bias", 1, 1, 0, 0, 1, 1, 1),  // 1x1 36->36
-    };
+    auto n = [&](const std::string& s) { return p + s; };  // prefixed name (weight key or intermediate)
+    ops.push_back(conv(in,       n("pi0"), n("proj_in.0.weight"), n("proj_in.0.bias"), 3, 3, 1, 1, 1, 1, 36)); // dw3x3 g36 36->72
+    ops.push_back(conv(n("pi0"), n("pi"),  n("proj_in.1.weight"), n("proj_in.1.bias"), 1, 1, 0, 0, 1, 1, 1));  // 1x1 72->72
+    ops.push_back(Op{ "chunk", { n("pi") }, { n("g"), n("c") } });                                             // -> g(36), c(36)
+    ops.push_back(conv(n("c"),   n("hsh"), n("mlp_h.shift_weight"), "", 1, 7, 0, 3, 1, 1, 36));                // 1x7 shift g36 (no bias)
+    ops.push_back(conv(n("hsh"), n("hc"),  n("mlp_h.weight"), n("mlp_h.bias"), 1, 1, 0, 0, 1, 1, 1));          // 1x1 36->36
+    ops.push_back(conv(n("hc"),  n("wsh"), n("mlp_w.shift_weight"), "", 7, 1, 3, 0, 1, 1, 36));                // 7x1 shift g36 (no bias)
+    ops.push_back(conv(n("wsh"), n("c2"),  n("mlp_w.weight"), n("mlp_w.bias"), 1, 1, 0, 0, 1, 1, 1));          // 1x1 36->36
+    ops.push_back(Op{ "concat", { in, n("c2") }, { n("cat") } });                                              // cat[x, c2] -> 72
+    ops.push_back(conv(n("cat"), n("merged"), n("merge.weight"), n("merge.bias"), 1, 1, 0, 0, 1, 1, 1));       // 1x1 72->36
+    ops.push_back(Op{ "gelu", { n("g") }, { n("gact") } });                                                    // gelu(g)
+    ops.push_back(Op{ "mul", { n("gact"), n("merged") }, { n("gated") } });                                    // gelu(g) * merged
+    ops.push_back(conv(n("gated"), out, n("proj_out.weight"), n("proj_out.bias"), 1, 1, 0, 0, 1, 1, 1));       // 1x1 36->36
+}
+
+// CCM/FFN: conv3x3 -> GELU -> conv1x1.
+void appendCCM(std::vector<Op>& ops, const std::string& p, const std::string& in, const std::string& out)
+{
+    auto n = [&](const std::string& s) { return p + s; };
+    ops.push_back(conv(in,       n("h0"), n("fn.0.weight"), n("fn.0.bias"), 3, 3, 1, 1, 1, 1, 1));
+    ops.push_back(Op{ "gelu", { n("h0") }, { n("h1") } });
+    ops.push_back(conv(n("h1"),  out,     n("fn.2.weight"), n("fn.2.bias"), 1, 1, 0, 0, 1, 1, 1));
+}
+
+std::vector<Op> programDFM() { std::vector<Op> ops; appendDFM(ops, "", "input", "output"); return ops; }
+std::vector<Op> programCCM() { std::vector<Op> ops; appendCCM(ops, "", "input", "output"); return ops; }
+
+// EncodeLayer: x = dfm(x) + x; x = ffn(x) + x. (encoders.*.* in rdg_arch.py)
+std::vector<Op> programEncodeLayer()
+{
+    std::vector<Op> ops;
+    appendDFM(ops, "dfm.", "input", "dfm_out");
+    ops.push_back(Op{ "add", { "input", "dfm_out" }, { "x1" } });   // residual
+    appendCCM(ops, "ffn.", "x1", "ffn_out");
+    ops.push_back(Op{ "add", { "x1", "ffn_out" }, { "output" } });  // residual
+    return ops;
 }
 }
 
@@ -97,9 +113,12 @@ int main(int argc, char** argv)
     const Tensor& input  = bundle.at("input");
     const Tensor& golden = bundle.at("golden_out");
 
-    const bool isDFM = bundle.count("proj_in.0.weight") != 0;
-    std::vector<Op> ops = isDFM ? programDFM() : programCCM();
-    std::printf("block: %s   (%zu ops)\n", isDFM ? "DFM" : "CCM/FFN", ops.size());
+    // Pick the block program from which weights the bundle carries.
+    std::vector<Op> ops; const char* blockName;
+    if (bundle.count("dfm.proj_in.0.weight")) { ops = programEncodeLayer(); blockName = "EncodeLayer"; }
+    else if (bundle.count("proj_in.0.weight")) { ops = programDFM(); blockName = "DFM"; }
+    else { ops = programCCM(); blockName = "CCM/FFN"; }
+    std::printf("block: %s   (%zu ops)\n", blockName, ops.size());
 
     // ---- device / queue / command list ----
     ComPtr<ID3D12Device> dev = CreateHighPerfDevice();
@@ -147,6 +166,7 @@ int main(int argc, char** argv)
     ComPtr<ID3D12PipelineState> psoConv   = makePSO(L"conv2d.hlsl", L"conv2d_CS");
     ComPtr<ID3D12PipelineState> psoGelu   = makePSO(L"gelu.hlsl",   L"gelu_CS");
     ComPtr<ID3D12PipelineState> psoMul     = makePSO(L"mul.hlsl",    L"mul_CS");
+    ComPtr<ID3D12PipelineState> psoAdd     = makePSO(L"add.hlsl",    L"add_CS");
     ComPtr<ID3D12PipelineState> psoConcat = makePSO(L"concat.hlsl", L"concat_CS");
 
     // ---- resource bookkeeping ----
@@ -220,6 +240,7 @@ int main(int argc, char** argv)
         }
         else if (op.kind == "gelu") { out = a.shape; pso = psoGelu.Get(); }
         else if (op.kind == "mul")  { out = a.shape; pso = psoMul.Get(); }
+        else if (op.kind == "add")  { out = a.shape; pso = psoAdd.Get(); }
         else if (op.kind == "concat")
         {
             Value b = vals.at(op.ins[1]);
@@ -244,7 +265,7 @@ int main(int argc, char** argv)
             cl->SetComputeRootShaderResourceView(3, op.bias.empty() ? zeroBiasVA(out.c)
                                                                     : wbuf.at(op.bias)->GetGPUVirtualAddress());
         }
-        else if (op.kind == "mul" || op.kind == "concat")
+        else if (op.kind == "mul" || op.kind == "add" || op.kind == "concat")
         {
             cl->SetComputeRootShaderResourceView(2, VA(vals.at(op.ins[1])));          // t1 = second input
         }
