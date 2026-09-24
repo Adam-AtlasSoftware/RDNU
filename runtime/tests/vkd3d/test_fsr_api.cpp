@@ -2,7 +2,8 @@
 // game does: context-free queries, create with the DX12 backend desc, per-frame dispatch, and
 // destroy. Runs each exposure mode, sharpening, jittered and display resolution motion vectors
 // and a render size change on real frames, and checks they agree with each other where FSR's
-// definitions say they must.
+// definitions say they must. One run goes through the provider object the way FidelityFX SDK
+// 2's loader does (api/internal/ffx_provider.h).
 //
 //   test_fsr_api <golden dir> [--frames N]
 //
@@ -11,14 +12,16 @@
 #include "../common/rdnut.h"
 #include "d3d12_util.h"
 
+#include <cstdlib>
+
 #include <dx12/ffx_api_dx12.h>
 #include <ffx_api.h>
+#include <ffx_provider.h>
 #include <ffx_upscale.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -57,6 +60,7 @@ struct Options
     bool     displayMv  = false;  // vectors at display resolution
     uint32_t smallFrom  = ~0u;    // first frame rendered at the small size
     uint32_t first      = 0;
+    bool     viaLoader  = false;  // dispatch and destroy through the context's provider object
 };
 
 struct Frames
@@ -118,6 +122,11 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
                                 gpu.Texture(SW, SH, DXGI_FORMAT_R32_TYPELESS, false, read),
                                 gpu.Texture(SW, SH, DXGI_FORMAT_R32G32_FLOAT, false, read)};
 
+    const ffxProvider* loader = o.viaLoader ? reinterpret_cast<const InternalContextHeader*>(ctx)->provider : nullptr;
+    if (loader)
+        CHECK(loader->CanProvide(FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE) && !std::strncmp(loader->GetVersionName(), "RDNU", 4),
+              "provider object");
+
     const size_t np = size_t(W) * H;
     r.ok            = true;
     for (uint32_t t = o.first; t < f.count && r.ok; ++t)
@@ -178,7 +187,7 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
         dd.cameraFar              = f.camera->data[t * 4 + 1];
         // the crop keeps the pixel pitch, so its vertical field of view shrinks
         dd.cameraFovAngleVertical = 2 * std::atan(std::tan(f.camera->data[t * 4 + 2] / 2) * float(rh) / float(H));
-        if (ffxDispatch(&ctx, &dd.header) != FFX_API_RETURN_OK)
+        if ((loader ? loader->Dispatch(&ctx, &dd.header) : ffxDispatch(&ctx, &dd.header)) != FFX_API_RETURN_OK)
         {
             std::printf("  ffxDispatch failed at frame %u\n", t);
             r.ok = false;
@@ -209,9 +218,11 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
         ffxQueryDescUpscaleGetGPUMemoryUsage qm{};
         qm.header.type            = FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE;
         qm.gpuMemoryUsageUpscaler = &mu;
-        CHECK(ffxQuery(&ctx, &qm.header) == FFX_API_RETURN_OK && mu.totalUsageInBytes > 0, "GPU memory query");
+        CHECK((loader ? loader->Query(&ctx, &qm.header) : ffxQuery(&ctx, &qm.header)) == FFX_API_RETURN_OK && mu.totalUsageInBytes > 0,
+              "GPU memory query");
     }
-    CHECK(ffxDestroyContext(&ctx, nullptr) == FFX_API_RETURN_OK && !ctx, "destroy");
+    Allocator alloc{nullptr};
+    CHECK((loader ? loader->DestroyContext(&ctx, alloc) : ffxDestroyContext(&ctx, nullptr)) == FFX_API_RETURN_OK && !ctx, "destroy");
     for (ID3D12Resource* x : {tColour, tDepth, tMotion, tExp, tOutput, tSmall[0], tSmall[1], tSmall[2]})
         x->Release();
     return r;
@@ -332,6 +343,10 @@ int main(int argc, char** argv)
     Options        o;
     const Result   base = Run(gpu, f, o);
     Print("exposure texture", base, 0);
+    o.viaLoader = true;
+    const Result loader = Run(gpu, f, o);
+    Print("through the SDK 2 provider", loader, 0);
+    o = Options();
     o.pre = 4.0f;
     const Result pre = Run(gpu, f, o);
     Print("texture, preExposure 4", pre, 0);
@@ -362,15 +377,17 @@ int main(int argc, char** argv)
     const Result fresh = Run(gpu, f, o);
     Print("small size only", fresh, half);
 
-    for (const Result* r : {&base, &pre, &none, &autoExp, &sharp, &jittered, &display, &resize, &fresh})
+    for (const Result* r : {&base, &loader, &pre, &none, &autoExp, &sharp, &jittered, &display, &resize, &fresh})
         CHECK(r->ok && r->psnr.size() == (r == &fresh ? f.count - half : f.count), "run incomplete");
     if (!g_failures)
     {
         const double aPre = Agreement(base, pre, 0, f), aNone = Agreement(base, none, 0, f), aJit = Agreement(base, jittered, 0, f);
         const double aSharp = Agreement(base, sharp, 0, f), aResize = Agreement(resize, fresh, half, f);
+        const double aLoader = Agreement(base, loader, 0, f);
         std::printf("agreement with the texture run (lowest frame PSNR, dB)\n");
         std::printf("  preExposure %.1f, 1/preExposure %.1f, jitter cancelled %.1f, sharpened %.1f\n", aPre, aNone, aJit, aSharp);
-        std::printf("  size change against a fresh small context: %.1f\n", aResize);
+        std::printf("  size change against a fresh small context: %.1f, provider object: %.1f\n", aResize, aLoader);
+        CHECK(aLoader >= 199, "the provider object path differs from the exports");
         CHECK(aPre > 50, "preExposure changes the result");
         CHECK(aNone > 50, "1 / preExposure differs from the same exposure as a texture");
         CHECK(aJit > 50, "jitter cancellation differs from unjittered vectors");

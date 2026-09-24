@@ -1,8 +1,8 @@
-// rdnu_ffx_api.cpp - the FidelityFX API of an FSR 3.1 DX12 DLL (ffx_api.h) with NSS as the
-// upscaler. Built as amd_fidelityfx_dx12.dll it replaces a game's FSR 3.1 DLL, and OptiScaler
-// can load it as its FSR 3.1 DX12 upscaler. Requests for anything but upscaling (frame
-// generation, swap chains) and hosts that pick another version go to AMD's DLL renamed to
-// amd_fidelityfx_dx12_original.dll next to this one, when it is there.
+// rdnu_ffx_api.cpp - the FidelityFX API (ffx_api.h) with NSS as the upscaler. The same DLL
+// works as FSR 3.1's amd_fidelityfx_dx12.dll, as FidelityFX SDK 2's
+// amd_fidelityfx_upscaler_dx12.dll behind AMD's loader, and as OptiScaler's FSR 3.1 DX12
+// upscaler. Requests for anything but upscaling (frame generation, swap chains) and hosts that
+// pick another version go to the AMD DLL it replaced, renamed <name>_original.dll.
 //
 // An NSS context is fixed to one render and output size: a new size creates a new context
 // (history restarts) and the old one is destroyed once the GPU is done with it. Pipelines and
@@ -68,40 +68,86 @@ struct Original
     PfnFfxDispatch       dispatch  = nullptr;
 };
 
+#ifdef _WIN32
+template <typename T>
+T Proc(HMODULE m, const char* name)
+{
+    return reinterpret_cast<T>(reinterpret_cast<void (*)()>(GetProcAddress(m, name)));
+}
+#endif
+
 const Original* LoadOriginal()
 {
 #ifdef _WIN32
-    static Original o;
-    static bool     tried = false;
-    if (!tried)
-    {
-        tried            = true;
-        HMODULE self     = nullptr;
-        wchar_t path[MAX_PATH];
+    static const Original o = [] {
+        Original r;
+        HMODULE  self = nullptr;
+        wchar_t  path[MAX_PATH];
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            reinterpret_cast<LPCWSTR>(&LoadOriginal), &self);
-        GetModuleFileNameW(self, path, MAX_PATH);
-        std::wstring dir(path);
-        dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
-        if (HMODULE m = LoadLibraryW((dir + L"amd_fidelityfx_dx12_original.dll").c_str()))
+        const DWORD n = GetModuleFileNameW(self, path, MAX_PATH);
+        if (n < 4 || n >= MAX_PATH)
+            return r;
+        const std::wstring original = std::wstring(path, n - 4) + L"_original.dll";
+        if (HMODULE m = LoadLibraryW(original.c_str()))
         {
-            o.create    = reinterpret_cast<PfnFfxCreateContext>(GetProcAddress(m, "ffxCreateContext"));
-            o.destroy   = reinterpret_cast<PfnFfxDestroyContext>(GetProcAddress(m, "ffxDestroyContext"));
-            o.configure = reinterpret_cast<PfnFfxConfigure>(GetProcAddress(m, "ffxConfigure"));
-            o.query     = reinterpret_cast<PfnFfxQuery>(GetProcAddress(m, "ffxQuery"));
-            o.dispatch  = reinterpret_cast<PfnFfxDispatch>(GetProcAddress(m, "ffxDispatch"));
+            r.create    = Proc<PfnFfxCreateContext>(m, "ffxCreateContext");
+            r.destroy   = Proc<PfnFfxDestroyContext>(m, "ffxDestroyContext");
+            r.configure = Proc<PfnFfxConfigure>(m, "ffxConfigure");
+            r.query     = Proc<PfnFfxQuery>(m, "ffxQuery");
+            r.dispatch  = Proc<PfnFfxDispatch>(m, "ffxDispatch");
         }
-    }
+        return r;
+    }();
     return o.create && o.destroy && o.configure && o.query && o.dispatch ? &o : nullptr;
 #else
     return nullptr;
 #endif
 }
 
+// ------------------------------------------------------------------ SDK 2 loader interface
+
+// AMD's SDK 2 loader creates contexts through the exports below, then calls the ffxProvider
+// object each context starts with (api/internal/ffx_provider.h). Its virtual table is spelled
+// out as the loader's compiler lays it out, MSVC on Windows (one destructor slot) and the
+// Itanium ABI elsewhere (two), so a DLL from any compiler matches it.
+struct Allocator
+{
+    const ffxAllocationCallbacks* cb;
+};
+
+#ifdef _WIN32
+constexpr int kDestructorSlots = 1;
+#else
+constexpr int kDestructorSlots = 2;
+#endif
+
+struct ProviderVtable
+{
+    void*           destructor[kDestructorSlots];
+    bool            (*canProvide)(const void*, uint64_t);
+    bool            (*isSupported)(const void*, void*);
+    uint64_t        (*getId)(const void*);
+    const char*     (*getVersionName)(const void*);
+    ffxReturnCode_t (*createContext)(const void*, ffxContext*, ffxCreateContextDescHeader*, Allocator&);
+    ffxReturnCode_t (*destroyContext)(const void*, ffxContext*, Allocator&);
+    ffxReturnCode_t (*configure)(const void*, ffxContext*, const ffxConfigureDescHeader*);
+    ffxReturnCode_t (*query)(const void*, ffxContext*, ffxQueryDescHeader*);
+    ffxReturnCode_t (*dispatch)(const void*, ffxContext*, const ffxDispatchDescHeader*);
+};
+
+struct Provider
+{
+    const ProviderVtable* vtable;
+};
+
+extern const Provider g_provider;
+
 // ------------------------------------------------------------------------------- upscaler
 
 struct Upscaler
 {
+    const Provider*                provider = &g_provider;  // must stay first
     ID3D12Device*                  device = nullptr;
     uint32_t                       flags  = 0;
     FfxApiDimensions2D             maxRender{}, maxUpscale{};
@@ -240,7 +286,7 @@ ID3D12Resource* Internal(Upscaler* u, ID3D12Resource*& slot, uint32_t width, uin
     return slot;
 }
 
-ffxReturnCode_t Dispatch(Upscaler* u, const ffxDispatchDescUpscale* d)
+ffxReturnCode_t DispatchUpscale(Upscaler* u, const ffxDispatchDescUpscale* d)
 {
     if (!d->commandList || !d->color.resource || !d->depth.resource || !d->motionVectors.resource || !d->output.resource)
         return FFX_API_RETURN_ERROR_PARAMETER;
@@ -379,7 +425,7 @@ void CreateMarker(Upscaler* u)
     u->done = static_cast<const volatile uint32_t*>(p);
 }
 
-void Destroy(Upscaler* u)
+void Teardown(Upscaler* u)
 {
     Retire(u);
     FreeRetired(u, true);
@@ -392,7 +438,7 @@ void Destroy(Upscaler* u)
         ffxReleaseInterfaceDX12(&u->iface);
 }
 
-ffxReturnCode_t Create(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* mem)
+ffxReturnCode_t CreateUpscaler(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* mem)
 {
     auto* up = reinterpret_cast<const ffxCreateContextDescUpscale*>(Find(desc, FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE));
     auto* be = reinterpret_cast<const ffxCreateBackendDX12Desc*>(Find(desc, FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12));
@@ -425,7 +471,7 @@ ffxReturnCode_t Create(ffxContext* context, ffxCreateContextDescHeader* desc, co
     if (e != FFX_OK)
     {
         Say(FFX_API_MESSAGE_TYPE_ERROR, "cannot run NSS on this device (error " + std::to_string(e) + ")");
-        Destroy(u);
+        Teardown(u);
         u->~Upscaler();
         if (mem && mem->dealloc)
             mem->dealloc(mem->pUserData, memory);
@@ -439,7 +485,7 @@ ffxReturnCode_t Create(ffxContext* context, ffxCreateContextDescHeader* desc, co
     return FFX_API_RETURN_OK;
 }
 
-ffxReturnCode_t Query(Upscaler* u, ffxQueryDescHeader* desc)
+ffxReturnCode_t QueryUpscaler(Upscaler* u, ffxQueryDescHeader* desc)
 {
     switch (desc->type)
     {
@@ -560,6 +606,56 @@ ffxReturnCode_t GetVersions(ffxQueryDescGetVersions* q)
     *q->outputCount = written;
     return FFX_API_RETURN_OK;
 }
+ffxReturnCode_t DestroyUpscaler(ffxContext* context, const ffxAllocationCallbacks* mem)
+{
+    auto* u = static_cast<Upscaler*>(*context);
+    {
+        std::lock_guard<std::mutex> l(g_lock);
+        g_ours.erase(u);
+    }
+    Teardown(u);
+    u->~Upscaler();
+    if (mem && mem->dealloc)
+        mem->dealloc(mem->pUserData, u);
+    else
+        ::operator delete(u);
+    *context = nullptr;
+    return FFX_API_RETURN_OK;
+}
+
+ffxReturnCode_t ConfigureUpscaler(const ffxConfigureDescHeader* desc)
+{
+    if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1)
+        g_message = reinterpret_cast<const ffxConfigureDescGlobalDebug1*>(desc)->fpMessage;
+    return desc->type == FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE || desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1
+               ? FFX_API_RETURN_OK  // FSR tuning keys have no NSS counterpart
+               : FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE;
+}
+
+ffxReturnCode_t DispatchUpscaler(Upscaler* u, const ffxDispatchDescHeader* desc)
+{
+    switch (desc->type)
+    {
+    case FFX_API_DISPATCH_DESC_TYPE_UPSCALE: return DispatchUpscale(u, reinterpret_cast<const ffxDispatchDescUpscale*>(desc));
+    case FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK: return FFX_API_RETURN_OK;  // NSS reads no reactive mask
+    default: return FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE;
+    }
+}
+
+const ProviderVtable g_vtable = {
+    {},
+    [](const void*, uint64_t type) { return type == FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE; },
+    [](const void*, void*) { return true; },
+    [](const void*) { return kVersionId; },
+    [](const void*) { return kVersion; },
+    [](const void*, ffxContext* c, ffxCreateContextDescHeader* d, Allocator& a) { return CreateUpscaler(c, d, a.cb); },
+    [](const void*, ffxContext* c, Allocator& a) { return DestroyUpscaler(c, a.cb); },
+    [](const void*, ffxContext*, const ffxConfigureDescHeader* d) { return ConfigureUpscaler(d); },
+    [](const void*, ffxContext* c, ffxQueryDescHeader* d) { return QueryUpscaler(static_cast<Upscaler*>(*c), d); },
+    [](const void*, ffxContext* c, const ffxDispatchDescHeader* d) { return DispatchUpscaler(static_cast<Upscaler*>(*c), d); },
+};
+
+const Provider g_provider{&g_vtable};
 }  // namespace
 
 FFX_API_ENTRY ffxReturnCode_t ffxCreateContext(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* memCb)
@@ -571,7 +667,7 @@ FFX_API_ENTRY ffxReturnCode_t ffxCreateContext(ffxContext* context, ffxCreateCon
     const Original* o = LoadOriginal();
     if (mine)
     {
-        ffxReturnCode_t r = Create(context, desc, memCb);
+        ffxReturnCode_t r = CreateUpscaler(context, desc, memCb);
         if (r == FFX_API_RETURN_OK || !o)
             return r;
         Say(FFX_API_MESSAGE_TYPE_WARNING, "falling back to AMD's upscaler");
@@ -583,37 +679,21 @@ FFX_API_ENTRY ffxReturnCode_t ffxDestroyContext(ffxContext* context, const ffxAl
 {
     if (!context)
         return FFX_API_RETURN_ERROR_PARAMETER;
-    if (!Ours(*context))
-    {
-        const Original* o = LoadOriginal();
-        return o ? o->destroy(context, memCb) : ffxReturnCode_t(FFX_API_RETURN_ERROR_PARAMETER);
-    }
-    auto* u = static_cast<Upscaler*>(*context);
-    {
-        std::lock_guard<std::mutex> l(g_lock);
-        g_ours.erase(u);
-    }
-    Destroy(u);
-    u->~Upscaler();
-    if (memCb && memCb->dealloc)
-        memCb->dealloc(memCb->pUserData, u);
-    else
-        ::operator delete(u);
-    *context = nullptr;
-    return FFX_API_RETURN_OK;
+    if (Ours(*context))
+        return DestroyUpscaler(context, memCb);
+    const Original* o = LoadOriginal();
+    return o ? o->destroy(context, memCb) : ffxReturnCode_t(FFX_API_RETURN_ERROR_PARAMETER);
 }
 
 FFX_API_ENTRY ffxReturnCode_t ffxConfigure(ffxContext* context, const ffxConfigureDescHeader* desc)
 {
     if (!desc)
         return FFX_API_RETURN_ERROR_PARAMETER;
-    const Original* o = LoadOriginal();
+    if (context && Ours(*context))
+        return ConfigureUpscaler(desc);
     if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1)
         g_message = reinterpret_cast<const ffxConfigureDescGlobalDebug1*>(desc)->fpMessage;
-    if (context && Ours(*context))
-        return desc->type == FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE || desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1
-                   ? FFX_API_RETURN_OK  // FSR tuning keys have no NSS counterpart
-                   : FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE;
+    const Original* o = LoadOriginal();
     if (o)
         return o->configure(context, desc);
     return desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1 ? FFX_API_RETURN_OK : FFX_API_RETURN_NO_PROVIDER;
@@ -632,9 +712,9 @@ FFX_API_ENTRY ffxReturnCode_t ffxQuery(ffxContext* context, ffxQueryDescHeader* 
     else if ((desc->type & FFX_API_EFFECT_MASK) == FFX_API_EFFECT_ID_UPSCALE || desc->type == FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION)
     {
         if (context && Ours(*context))
-            return Query(static_cast<Upscaler*>(*context), desc);
+            return QueryUpscaler(static_cast<Upscaler*>(*context), desc);
         if (!context || !*context)
-            return Query(nullptr, desc);  // context-free upscale queries
+            return QueryUpscaler(nullptr, desc);  // context-free upscale queries
     }
     const Original* o = LoadOriginal();
     return o ? o->query(context, desc) : ffxReturnCode_t(FFX_API_RETURN_NO_PROVIDER);
@@ -644,16 +724,8 @@ FFX_API_ENTRY ffxReturnCode_t ffxDispatch(ffxContext* context, const ffxDispatch
 {
     if (!context || !desc)
         return FFX_API_RETURN_ERROR_PARAMETER;
-    if (!Ours(*context))
-    {
-        const Original* o = LoadOriginal();
-        return o ? o->dispatch(context, desc) : ffxReturnCode_t(FFX_API_RETURN_ERROR_PARAMETER);
-    }
-    auto* u = static_cast<Upscaler*>(*context);
-    switch (desc->type)
-    {
-    case FFX_API_DISPATCH_DESC_TYPE_UPSCALE: return Dispatch(u, reinterpret_cast<const ffxDispatchDescUpscale*>(desc));
-    case FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK: return FFX_API_RETURN_OK;  // NSS reads no reactive mask
-    default: return FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE;
-    }
+    if (Ours(*context))
+        return DispatchUpscaler(static_cast<Upscaler*>(*context), desc);
+    const Original* o = LoadOriginal();
+    return o ? o->dispatch(context, desc) : ffxReturnCode_t(FFX_API_RETURN_ERROR_PARAMETER);
 }

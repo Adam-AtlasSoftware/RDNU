@@ -7,6 +7,12 @@
 #include <AmdExtD3DDeviceApi.h>
 #include <AmdExtD3DShaderIntrinsicsApi.h>
 
+#ifdef __MINGW32__  // __uuidof needs the ids spelled out for mingw
+__CRT_UUID_DECL(IAmdExtD3DFactory, 0x014937ec, 0x9288, 0x446f, 0xa9, 0xac, 0xd7, 0x5a, 0x8e, 0x3a, 0x98, 0x4f)
+__CRT_UUID_DECL(IAmdExtD3DDevice8, 0xf714e11a, 0xb54e, 0x4e0f, 0xab, 0xc5, 0xdf, 0x58, 0xb1, 0x81, 0x33, 0xd1)
+__CRT_UUID_DECL(IAmdExtD3DShaderIntrinsics, 0xba019d53, 0xccab, 0x4cbd, 0xb5, 0x6a, 0x72, 0x30, 0xed, 0x43, 0x30, 0xad)
+#endif
+
 namespace rdnu
 {
 namespace
@@ -24,7 +30,7 @@ bool EnableAmdWaveMatrixInt8(ID3D12Device* device)
     HMODULE driver = GetModuleHandleW(L"amdxc64.dll");
     if (!driver)
         return false;
-    auto create = reinterpret_cast<PFNAmdExtD3DCreateInterface>(GetProcAddress(driver, "AmdExtD3DCreateInterface"));
+    auto create = reinterpret_cast<PFNAmdExtD3DCreateInterface>(reinterpret_cast<void (*)()>(GetProcAddress(driver, "AmdExtD3DCreateInterface")));
     Ref<IAmdExtD3DFactory> factory;
     if (!create || FAILED(create(device, IID_PPV_ARGS(&factory.p))))
         return false;
