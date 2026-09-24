@@ -12,24 +12,27 @@ passes through the backend interface, `ffx-api/src/ffx_provider_nss.cpp` exposes
 FFX API (`ffxApiCreateContextDescNss`, `ffxApiDispatchDescNss`). The SDK only has a Vulkan backend
 and runs the network as a `VK_ARM_data_graph` (VGF) job.
 
-RDNU keeps the component and the API and supplies what is missing:
+RDNU keeps the component and supplies what is missing:
 
 ```
 game / FSR sample / OptiScaler
-        │  FFX API (ffx_nss.h): colour, depth, MVs, jitter, exposure, camera, reset
+        │  FidelityFX API, FSR 3.1 upscale descriptors
         ▼
-ffx_provider_nss  ──►  ffx_nss.cpp (pass scheduling, constants, resources)   [Arm, reused]
+rdnu_ffx_api.cpp: FSR-to-NSS mapping, exposure, motion vector   [RDNU, src/provider]
+        │         and sharpening passes, AMD's DLL for the rest
+        ▼
+ffx_nss.cpp (pass scheduling, constants, resources)              [Arm, reused unchanged]
         │
         ▼
-DX12 backend (FidelityFX 1.1.3 ffx_dx12.cpp from the SDK fork)                [reused]
+ffx_nss_dx12.cpp: FidelityFX backend interface on D3D12          [RDNU, src/backend_dx12]
    ├─ DepthScatter, DisocclusionMaskLQ, Preprocess, GenerateOffsetLut,
-   │  Postprocess, DebugView ............ HLSL ports of the GLSL passes        [RDNU]
-   └─ DataGraph ........................ RDNU INT8 conv engine (14 convs)     [RDNU]
+   │  Postprocess, DebugView ..... HLSL ports of Arm's GLSL        [RDNU, shaders/nss]
+   └─ DataGraph ................. INT8 conv engine (14 convs)     [RDNU, src/engine, shaders/net]
 ```
 
-The data-graph job becomes a sequence of compute dispatches on the engine's buffers; the
-pre-process pass writes the 12-channel input tensor in the engine's layout and the post-process
-pass reads the two output tensors. Everything else (history ping-pong, feedback tensor, luma
+The data-graph job becomes a sequence of compute dispatches over one arena shared by every
+context; the pre-process pass writes the 12-channel input tensor and the post-process pass reads
+the KPN and feedback tensors. Everything else (history ping-pong, feedback tensor, luma
 derivative, depth tm1, constants, jitter phase queries) is the component's existing code.
 
 ## 2. Passes and resources (from `ffx_nss_private.h` and the pre-process bindings)
@@ -82,34 +85,27 @@ the golden (`nss_backbone_int8.rdnut`); the GPU must match it bit-exactly in the
 
 ## 5. Injection
 
-- **FSR sample:** the provider registers `FFX_API_EFFECT_ID_NSS`; the sample's upscaler module
-  gets an "RDNU" entry that fills `ffxApiDispatchDescNss` from the same inputs it gives FSR.
-- **Games:** ship the provider as an FSR-3.1-API-compatible upscaler DLL. OptiScaler already
-  bridges DLSS/XeSS/FSR inputs (colour, depth, MVs, jitter, exposure, reset, camera) to FSR-API
-  providers, which is the whole `ffxApiDispatchDescNss` input set; no G-buffers are needed.
-- Inputs NSS does not take: reactive/transparency masks (documented limitation).
+- **Games:** the DLL replaces `amd_fidelityfx_dx12.dll` (FSR 3.1) or
+  `amd_fidelityfx_upscaler_dx12.dll` (FidelityFX SDK 2, behind AMD's loader), with AMD's DLL kept
+  as `<name>_original.dll` for frame generation and the other upscaler versions. RDNU is listed
+  first, so it is the default. For SDK 2 the context starts with a provider object laid out as
+  AMD's MSVC loader expects, whatever compiler built the DLL.
+- **OptiScaler:** its FSR 3.1 path feeds DLSS and XeSS inputs through the same descriptors.
+- **FSR sample:** `runtime/integration/*.patch`; "RDNU (AI)" pins the context to RDNU.
+- **Conventions:** NSS's jitter is FSR's negated; the provider flips it. Measured on the same
+  frames, each upscaler loses about 4 dB with the other's sign. NSS reads no reactive or
+  transparency masks. Each render size is its own NSS context, so dynamic resolution restarts the
+  history.
 
 ## 6. Work list
 
-Done in this repo:
-- Submodules: model gym, capture plugin, NSS/NFRU weights, Arm SDK, datasets (`Datasets.md`).
-- `runtime/tools/nss_export.py`: fp32 + INT8 weight bundles with per-layer goldens; counts verified.
-- `programNSS` / `programNSSInt8` in the harness engine; `relu`, `sigmoid`, `upsample_nearest`
-  kernels; zero-point support in `conv2d_int8.hlsl`; `run_engine` targets for both bundles.
+Done (see `NSS_Implementation_Plan.md` for verification): export and goldens, DP4a and WMMA
+kernels, engine, pass ports, D3D12 backend, FidelityFX API DLL, FSR sample patch, captures,
+`compare.py`, bench, CMake with Linux and Wine test paths.
 
-Next, in order:
-1. **GPU validation** (RX 7900 XTX): `nss_export.py` then `run_engine`; fp32 within 1e-3,
-   INT8 bit-exact. Fix anything the checkpoints (`chk.conv2d_*`, `chk.kpn`) localise.
-2. **Pre/post goldens:** extend the exporter to run `preprocess_torch` / `postprocess_torch` on
-   a few frames of the Bistro test split and dump their inputs/outputs; these are the goldens for
-   the HLSL pass ports.
-3. **Pass ports:** GLSL shared headers → HLSL (`ffx_nss_*`), validated per pass against 2.
-4. **DX12 backend for the Arm component:** compile `ffx_nss.cpp` + `ffx_provider_nss.cpp`
-   against the FidelityFX 1.1.3 DX12 backend in the SDK fork; implement the DataGraph job as
-   engine dispatches; the interface version mismatch, if any, is the first thing to check.
-5. **Sample integration and first pictures:** RDNU selectable in the FSR sample; temporal on;
-   `reset` on camera cut; RCAS after.
-6. **Evaluation vs FSR 4.1** on captured sequences (FLIP, LPIPS, tPSNR, CGVQM, crops, RGP
-   timings); then decide on retraining per `NSS_Quality_Plan.md`.
-7. **Performance:** move the 14 convs onto the padded-layout WMMA path (RDNA3) and a DP4a path
-   (RDNA2) from `RDNU_Runtime_Plan.md` §3; fuse ReLU/requantise into the conv epilogue.
+Next, on the RX 7900 XTX and RX 6800 XT:
+1. `ctest`, then `rdnu_prod --time` and `rdnu_bench` at 1080p, 1440p and 4K
+   (`runtime/tools/eval/bench.md`), WMMA against `RDNU_FORCE_DP4A=1`.
+2. The FSR sample with RDNU and its debug view; check jitter with the `low_res_color` tile.
+3. Games by DLL swap and through OptiScaler; captures with `RDNU_COMPARE` against FSR 4.1.
+4. Decide on retraining per `NSS_Quality_Plan.md`.

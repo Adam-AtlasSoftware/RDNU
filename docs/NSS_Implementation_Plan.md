@@ -53,6 +53,39 @@ Create/Destroy/Configure/Query/Dispatch. `ffxDispatchDescUpscale` (FSR 3.1) carr
 MVs, exposure, reactive, T&C, output, jitter, MV scale, render/upscale size, sharpening, frame time,
 pre-exposure, reset, camera near/far/FoV, flags.
 
+## Status (2026-09-24)
+
+All nine packages are implemented. Everything below runs in `ctest` on Linux (lavapipe through
+vkd3d-proton, and Vulkan for the GLSL cross-checks), and on the Windows binaries under Wine
+(`runtime/tools/run_wine_tests.sh`).
+
+| Package | Verified here |
+|---|---|
+| WP1, WP3, WP4 | INT8 network bit-exact to the exporter golden on D3D12, also at a smaller size in the same arena; plan invariants from 8×8 to 4K |
+| WP5 | every pass against Arm's GLSL on real Bistro frames, 2× and 1.5× (codes ±1 at rounding ties) |
+| WP6 | Arm's component end to end on D3D12; PSNR equal to the Vulkan run |
+| WP7 | FidelityFX API as a game drives it: exposure modes, sharpening, motion vector flags, size changes, forwarding; AMD's signed SDK 2 loader gives identical output |
+| WP8 | captures scored by `compare.py` reproduce the test's PSNR; AMD's FSR 3.1.5 captured on the same inputs |
+| WP9 | CMake presets for Windows, Linux and MinGW; `check_shaders` over every permutation |
+
+Where the build departs from the plan:
+
+- **Backend:** RDNU's own D3D12 backend (`src/backend_dx12`) replaces the FidelityFX 1.1.3 one.
+  It caches pipelines and shares one network engine across contexts, so a new render size only
+  allocates textures.
+- **Provider:** a standalone FidelityFX API DLL rather than a provider in the fork's table. It
+  also serves FidelityFX SDK 2's loader, forwards to AMD's DLL, and cross-builds with MinGW.
+- **Jitter:** NSS's sign is FSR's negated (measured, about 4 dB either way); the provider flips it.
+- **Exposure:** computed on the GPU and patched into the NSS constants; Arm's shaders are unchanged.
+- **Motion vectors:** jitter cancellation and display-resolution vectors are supported through a
+  small pass that mirrors FSR 3, not rejected.
+- **Capture:** in the provider (`RDNU_CAPTURE`, `RDNU_COMPARE`), so it works in games as well as the
+  sample.
+- **FSR sample:** a patch for the fork (`runtime/integration`); the fork is not modified here.
+- **Not supported:** `GPU_MEMORY_USAGE_V2` (context-free memory estimate), reactive and
+  transparency masks, non-linear colour input (warned). Dynamic resolution restarts the history
+  at each new size.
+
 ---
 
 ## 1. Target layout
@@ -364,13 +397,17 @@ engine and the mapping tests.
 
 ## 4. Hand-over checklist (first hour on the 7900 XTX)
 
-1. `python runtime/tools/nss_export.py` → both CHW bundles + `nss_prod.rdnut` + manifest.
-2. `cmake --build build --target run_engine` → reference NSS fp32 (≤ 1e-3) and INT8 (exact).
-3. `rdnu_engine --prod nss_prod.rdnut` → DP4a exact; `--force-wmma` exact; `--time 200` → ms at
-   the bundle size, then at 1080p/4K synthetic inputs.
-4. `rdnu_pass_harness` on the 8 Bistro frames, one pass at a time.
-5. FSR sample with RDNU selected, debug view on.
-6. Then `NSS_Quality_Plan.md` §6 (LOD bias, jitter length, RCAS, evaluation vs FSR 4.1).
+1. `python runtime/tools/nss_export.py` and `python runtime/tools/nss_pass_frames.py <Bistro
+   sequence> --start 60 --frames 16` for the goldens.
+2. `cmake --preset windows`, build Release, `ctest --test-dir build/windows -C Release`: every
+   test on the real GPU, WMMA on RDNA3.
+3. `rdnu_prod runtime\tools\golden --time 200 --size 1920x1088`, with and without `--force-dp4a`;
+   `rdnu_bench` at the sizes in `runtime/tools/eval/bench.md`.
+4. `run_engine`: the fp32 reference within 1e-3 and INT8 exact.
+5. The FSR sample with the patch, "RDNU (AI)" and the debug view; `low_res_color` must shake while
+   `unjittered_color` stays still.
+6. A game by DLL swap, captured with `RDNU_COMPARE=4.1`, scored with `compare.py`.
+7. Then `NSS_Quality_Plan.md` §6 (LOD bias, jitter length, RCAS, evaluation against FSR 4.1).
 
 ## 5. Explicitly out of scope here
 
