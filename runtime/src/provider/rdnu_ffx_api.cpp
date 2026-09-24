@@ -7,6 +7,12 @@
 // An NSS context is fixed to one render and output size: a new size creates a new context
 // (history restarts) and the old one is destroyed once the GPU is done with it. Pipelines and
 // the network engine are shared, so a new context only allocates its own textures.
+//
+// RDNU_FORCE_DP4A=1 runs the DP4a network kernels on RDNA3 too (A/B timing).
+// RDNU_CAPTURE=<dir> dumps every dispatch (rdnu_capture.h). With RDNU_COMPARE=<version> as well,
+// AMD's upscaler of that version (a substring of its name, or any) runs on the same inputs into
+// a private texture captured as "reference", for runtime/tools/eval/compare.py.
+#include "rdnu_capture.h"
 #include "rdnu_upscale_map.h"
 
 #include "../backend_dx12/ffx_nss_dx12.h"
@@ -16,6 +22,8 @@
 #include <ffx_api.h>
 #include <ffx_upscale.h>
 
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -165,6 +173,9 @@ struct Upscaler
     const volatile uint32_t*       done         = nullptr;
     uint64_t                       frame        = 0;
     bool                           warnedColour = false;
+    std::unique_ptr<rdnu::Capture> capture;
+    ffxContext                     reference       = nullptr;  // AMD's upscaler on the same inputs
+    ID3D12Resource*                referenceOutput = nullptr;
 };
 
 const ffxApiHeader* Find(const ffxApiHeader* h, uint64_t type)
@@ -211,10 +222,17 @@ void Retire(Upscaler* u)
         u->retired.push_back({std::move(u->nss), u->frame});
 }
 
+// Dispatches the GPU has finished, by the marker, else assumed after kRetireAfter more.
+uint64_t Completed(const Upscaler* u)
+{
+    const uint64_t assumed = u->frame > kRetireAfter ? u->frame - kRetireAfter : 0;
+    return u->done ? std::max<uint64_t>(assumed, *u->done) : assumed;
+}
+
 // Something retired after dispatch n is free once the GPU has finished n dispatches.
 bool Idle(const Upscaler* u, uint64_t retiredAt)
 {
-    return retiredAt + kRetireAfter <= u->frame || (u->done && *u->done >= uint32_t(retiredAt));
+    return Completed(u) >= retiredAt;
 }
 
 void FreeRetired(Upscaler* u, bool all)
@@ -286,6 +304,47 @@ ID3D12Resource* Internal(Upscaler* u, ID3D12Resource*& slot, uint32_t width, uin
     return slot;
 }
 
+// Captures this dispatch; with a reference context, AMD's upscaler runs on the same inputs first.
+void Record(Upscaler* u, ID3D12GraphicsCommandList* cl, const ffxDispatchDescUpscale* d, FfxApiDimensions2D upscale)
+{
+    ID3D12Resource* output = static_cast<ID3D12Resource*>(d->output.resource);
+    if (u->reference)
+    {
+        const D3D12_RESOURCE_DESC o = output->GetDesc();
+        Internal(u, u->referenceOutput, uint32_t(o.Width), o.Height, o.Format, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        ffxDispatchDescUpscale r = *d;
+        r.header.pNext           = nullptr;
+        r.output                 = ffxApiGetResourceDX12(u->referenceOutput, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+        if (!u->referenceOutput || LoadOriginal()->dispatch(&u->reference, &r.header) != FFX_API_RETURN_OK)
+            Say(FFX_API_MESSAGE_TYPE_WARNING, "the reference upscaler failed");
+    }
+    const rdnu::CaptureImage images[] = {
+        {"color", static_cast<ID3D12Resource*>(d->color.resource), D3dState(d->color.state)},
+        {"depth", static_cast<ID3D12Resource*>(d->depth.resource), D3dState(d->depth.state)},
+        {"motion", static_cast<ID3D12Resource*>(d->motionVectors.resource), D3dState(d->motionVectors.state)},
+        {"exposure", static_cast<ID3D12Resource*>(d->exposure.resource), D3dState(d->exposure.state)},
+        {"output", output, D3dState(d->output.state)},
+        {"reference", u->reference ? u->referenceOutput : nullptr, D3D12_RESOURCE_STATE_UNORDERED_ACCESS},
+    };
+    rdnu::CaptureParams p;
+    p.jitter[0]   = d->jitterOffset.x;
+    p.jitter[1]   = d->jitterOffset.y;
+    p.mvScale[0]  = d->motionVectorScale.x;
+    p.mvScale[1]  = d->motionVectorScale.y;
+    p.camera[0]   = d->cameraNear;
+    p.camera[1]   = d->cameraFar;
+    p.camera[2]   = d->cameraFovAngleVertical;
+    p.preExposure = d->preExposure;
+    p.sharpness   = d->enableSharpening ? d->sharpness : 0.0f;
+    p.render[0]   = d->renderSize.width;
+    p.render[1]   = d->renderSize.height;
+    p.upscale[0]  = upscale.width;
+    p.upscale[1]  = upscale.height;
+    p.reset       = d->reset;
+    p.flags       = u->flags;
+    u->capture->Record(cl, u->frame, images, sizeof(images) / sizeof(images[0]), p);
+}
+
 ffxReturnCode_t DispatchUpscale(Upscaler* u, const ffxDispatchDescUpscale* d)
 {
     if (!d->commandList || !d->color.resource || !d->depth.resource || !d->motionVectors.resource || !d->output.resource)
@@ -302,6 +361,8 @@ ffxReturnCode_t DispatchUpscale(Upscaler* u, const ffxDispatchDescUpscale* d)
         if (CreateNss(u, render, upscale) != FFX_OK)
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
     FreeRetired(u, false);
+    if (u->capture)
+        u->capture->Write(Completed(u));
 
     auto* cl = static_cast<ID3D12GraphicsCommandList*>(d->commandList);
     FfxNssDx12Exposure e;
@@ -387,6 +448,8 @@ ffxReturnCode_t DispatchUpscale(Upscaler* u, const ffxDispatchDescUpscale* d)
     if (sharpen && ffxNssDx12Sharpen(&u->iface, cl, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, output, D3dState(d->output.state),
                                      upscale.width, upscale.height, d->sharpness) != FFX_OK)
         return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+    if (u->capture)
+        Record(u, cl, d, upscale);
     u->fresh = false;
     ++u->frame;
     ID3D12GraphicsCommandList2* cl2 = nullptr;
@@ -428,15 +491,53 @@ void CreateMarker(Upscaler* u)
 
 void Teardown(Upscaler* u)
 {
+    u->capture.reset();
+    if (u->reference)
+        LoadOriginal()->destroy(&u->reference, nullptr);
     Retire(u);
     FreeRetired(u, true);
-    for (ID3D12Resource* r : {u->sharpenInput, u->motion})
+    for (ID3D12Resource* r : {u->sharpenInput, u->motion, u->referenceOutput})
         if (r)
             r->Release();
     if (u->marker)
         u->marker->Release();
     if (u->iface.scratchBuffer)
         ffxReleaseInterfaceDX12(&u->iface);
+}
+
+// AMD's upscaler named by RDNU_COMPARE, through the original DLL, for captures.
+void CreateReference(Upscaler* u, const ffxCreateContextDescUpscale* up, const ffxCreateBackendDX12Desc* be)
+{
+    const char*     want = std::getenv("RDNU_COMPARE");
+    const Original* o    = LoadOriginal();
+    if (!want || !o)
+        return;
+    uint64_t                count = 16;
+    uint64_t                ids[16];
+    const char*             names[16];
+    ffxQueryDescGetVersions q{};
+    q.header.type    = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+    q.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+    q.device         = u->device;
+    q.outputCount    = &count;
+    q.versionIds     = ids;
+    q.versionNames   = names;
+    if (o->query(nullptr, &q.header) != FFX_API_RETURN_OK)
+        return;
+    for (uint64_t i = 0; i < count; ++i)
+        if (names[i] && std::strstr(names[i], want))
+        {
+            ffxCreateContextDescUpscale c = *up;
+            ffxCreateBackendDX12Desc    b = *be;
+            ffxOverrideVersion          v{};
+            v.header.type                 = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
+            v.versionId                   = ids[i];
+            c.header.pNext                = &b.header;
+            b.header.pNext                = &v.header;
+            if (o->create(&u->reference, &c.header, nullptr) == FFX_API_RETURN_OK)
+                Say(FFX_API_MESSAGE_TYPE_WARNING, std::string("capturing AMD ") + names[i] + " as the reference");
+            return;
+        }
 }
 
 ffxReturnCode_t CreateUpscaler(ffxContext* context, ffxCreateContextDescHeader* desc, const ffxAllocationCallbacks* mem)
@@ -456,6 +557,8 @@ ffxReturnCode_t CreateUpscaler(ffxContext* context, ffxCreateContextDescHeader* 
     u->flags      = up->flags;
     u->maxRender  = up->maxRenderSize;
     u->maxUpscale = up->maxUpscaleSize;
+    const char* dp4a = std::getenv("RDNU_FORCE_DP4A");
+    ffxNssDx12ForceDp4a(dp4a && *dp4a && *dp4a != '0');
     u->scratch.resize(ffxGetScratchMemorySizeDX12(kMaxNss));
     CreateMarker(u);
     FfxErrorCode e = ffxGetInterfaceDX12(&u->iface, u->device, u->scratch.data(), u->scratch.size(), kMaxNss);
@@ -469,6 +572,8 @@ ffxReturnCode_t CreateUpscaler(ffxContext* context, ffxCreateContextDescHeader* 
         // validates the device and builds every pipeline before the first frame
         e = CreateNss(u, u->maxRender, u->maxUpscale);
     }
+    if (e == FFX_OK && (u->capture = rdnu::Capture::FromEnvironment(u->device)))
+        CreateReference(u, up, be);
     if (e != FFX_OK)
     {
         Say(FFX_API_MESSAGE_TYPE_ERROR, "cannot run NSS on this device (error " + std::to_string(e) + ")");

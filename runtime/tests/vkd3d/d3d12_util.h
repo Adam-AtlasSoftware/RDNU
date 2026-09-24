@@ -143,7 +143,7 @@ struct Gpu
     }
 };
 
-uint16_t ToHalf(float f)
+inline uint16_t ToHalf(float f)
 {
     uint32_t x;
     std::memcpy(&x, &f, 4);
@@ -163,7 +163,7 @@ uint16_t ToHalf(float f)
     return uint16_t(s | (h + (r > 0x1000 || (r == 0x1000 && (h & 1)))));
 }
 
-float FromHalf(uint16_t h)
+inline float FromHalf(uint16_t h)
 {
     const uint32_t s = uint32_t(h & 0x8000) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff;
     uint32_t       x = e == 0 ? s : e == 31 ? s | 0x7f800000 | (m << 13) : s | ((e + 112) << 23) | (m << 13);

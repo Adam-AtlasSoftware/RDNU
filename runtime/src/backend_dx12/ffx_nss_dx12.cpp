@@ -1171,6 +1171,17 @@ void PatchConstants(Backend* b, ID3D12GraphicsCommandList* cl)
 
 // ---------------------------------------------------------------------------------- execution
 
+// A named region for RGP, PIX and RenderDoc (PIX's UTF-16 event encoding).
+void BeginEvent(ID3D12GraphicsCommandList* cl, const char* name)
+{
+    WCHAR  w[64];
+    size_t n = 0;
+    for (; name[n] && n + 1 < 64; ++n)
+        w[n] = WCHAR(name[n]);
+    w[n] = 0;
+    cl->BeginEvent(0, w, UINT((n + 1) * sizeof(WCHAR)));
+}
+
 void ExecuteCompute(Backend* b, ID3D12GraphicsCommandList* cl, const FfxComputeJobDescription& j)
 {
     auto*                     p = static_cast<Pipeline*>(j.pipeline.pipeline);
@@ -1303,10 +1314,16 @@ FfxErrorCode ExecuteGpuJobs(FfxInterface* i, FfxCommandList commandList, FfxUInt
     {
         switch (job.jobType)
         {
-        case FFX_GPU_JOB_COMPUTE: ExecuteCompute(b, cl, job.computeJobDescriptor); break;
+        case FFX_GPU_JOB_COMPUTE:
+            BeginEvent(cl, job.computeJobDescriptor.pipeline.name);
+            ExecuteCompute(b, cl, job.computeJobDescriptor);
+            cl->EndEvent();
+            break;
         case FFX_GPU_JOB_DATA_GRAPH:
+            BeginEvent(cl, b->wmma ? "NSS network (WMMA)" : "NSS network (DP4a)");
             if (!ExecuteDataGraph(b, cl, job.dataGraphJobDescription))
                 result = FFX_ERROR_BACKEND_API_ERROR;
+            cl->EndEvent();
             break;
         case FFX_GPU_JOB_CLEAR_FLOAT: ExecuteClear(b, cl, job.clearJobDescriptor.target, job.clearJobDescriptor.color, nullptr); break;
         case FFX_GPU_JOB_CLEAR_UINT: ExecuteClear(b, cl, job.clearUintJobDescriptor.target, nullptr, job.clearUintJobDescriptor.color); break;
@@ -1438,8 +1455,10 @@ FfxErrorCode ffxNssDx12PrepareExposure(FfxInterface* i, ID3D12GraphicsCommandLis
         uint32_t k[kAuxConstants] = {e.texture ? 0u : 1u, 0, e.width, e.height};
         const float scale = 1.0f / pre;
         std::memcpy(&k[1], &scale, 4);
+        BeginEvent(cl, "RDNU exposure");
         BindAux(b, cl, b->auxPrepare, k, src, nullptr, b->exposure, false);
         cl->Dispatch(1, 1, 1);
+        cl->EndEvent();
         Transition(b, src, state, e.texture ? e.textureState : e.colourState);
         UavBarrier(cl);
     }
@@ -1465,8 +1484,10 @@ FfxErrorCode ffxNssDx12PrepareMotion(FfxInterface* i, ID3D12GraphicsCommandList*
                                  display ? m.sourceHeight : m.renderHeight};
     std::memcpy(&k[4], f, sizeof(f));
     k[10] = display;
+    BeginEvent(cl, "RDNU motion");
     BindAux(b, cl, b->auxMotion, k, m.source, nullptr, m.target, false);
     cl->Dispatch((m.renderWidth + 7) / 8, (m.renderHeight + 7) / 8, 1);
+    cl->EndEvent();
     Transition(b, m.source, src, m.sourceState);
     Transition(b, m.target, dst, kSrvState);
     Flush(b, cl);
@@ -1494,8 +1515,10 @@ FfxErrorCode ffxNssDx12Sharpen(FfxInterface* i, ID3D12GraphicsCommandList* cl, I
     const float    con  = std::exp2(-(2.0f - 2.0f * std::min(std::max(sharpness, 0.0f), 1.0f)));
     uint32_t       k[kAuxConstants] = {width, height};
     std::memcpy(&k[2], &con, 4);
+    BeginEvent(cl, "RDNU RCAS");
     BindAux(b, cl, b->auxRcas, k, input, b->exposure, output, false);
     cl->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    cl->EndEvent();
     UavBarrier(cl);
     Transition(b, input, in, inputState);
     Transition(b, output, out, outputState);

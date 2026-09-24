@@ -143,10 +143,16 @@ if(RDNU_HAVE_DX12)
 endif()
 
 if(RDNU_HAVE_DX12 AND RDNU_HAVE_FFX_API)
-    add_library(rdnu_provider OBJECT src/provider/rdnu_ffx_api.cpp src/provider/rdnu_upscale_map.cpp)
+    add_library(rdnu_provider OBJECT src/provider/rdnu_ffx_api.cpp src/provider/rdnu_upscale_map.cpp src/provider/rdnu_capture.cpp)
     target_include_directories(rdnu_provider SYSTEM PUBLIC "${RDNU_FFX_API_INC}" "${RDNU_FFX_UPSCALE_INC}")
     target_link_libraries(rdnu_provider PUBLIC rdnu_dx12)
     set_target_properties(rdnu_provider PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+if(TARGET rdnu_provider)
+    # a whole upscale through the FidelityFX API, GPU timed
+    add_executable(rdnu_bench harness/rdnu_bench.cpp)
+    target_link_libraries(rdnu_bench PRIVATE rdnu_provider)
 endif()
 
 if(WIN32 AND TARGET rdnu_provider)
@@ -214,6 +220,18 @@ if(TARGET rdnu_dx12)
         if(TARGET test_fsr_api)
             add_test(NAME fsr_api COMMAND test_fsr_api "${RDNU_GOLDEN_DIR}" --frames 8)
             list(APPEND _tests fsr_api)
+            find_package(Python3 COMPONENTS Interpreter)
+            if(Python3_FOUND)
+                # dispatches captured by the provider, scored against the ground truth
+                set(_capture "${CMAKE_CURRENT_BINARY_DIR}/capture")
+                add_test(NAME fsr_capture COMMAND ${CMAKE_COMMAND} -E env "RDNU_CAPTURE=${_capture}" RDNU_CAPTURE_FRAMES=6
+                         $<TARGET_FILE:test_fsr_api> "${RDNU_GOLDEN_DIR}" --frames 6)
+                add_test(NAME capture_compare COMMAND Python3::Interpreter "${RDNU_ROOT}/tools/eval/compare.py" "${_capture}"
+                         --context 0 --truth "${RDNU_GOLDEN_DIR}/nss_frames.rdnut" --min-psnr 27)
+                set_tests_properties(fsr_capture PROPERTIES FIXTURES_SETUP capture)
+                set_tests_properties(capture_compare PROPERTIES FIXTURES_REQUIRED capture)
+                list(APPEND _tests fsr_capture)
+            endif()
         endif()
     endif()
     if(_tests AND _env)
