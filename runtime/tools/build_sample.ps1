@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Build the FidelityFX FSR sample (with the RDNU upscaler integrated) using MSBuild,
-    without opening the Visual Studio IDE.
+    Build the FidelityFX FSR sample using MSBuild, without opening the Visual Studio IDE.
 
 .DESCRIPTION
     Locates MSBuild via vswhere and builds
     runtime/external/FidelityFX-SDK_WithFSR4/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.sln.
-    The RDNU backend (runtime/src/rdg_dx12_backend.cpp) and shaders/models are pulled in by that
-    solution's project references and post-build copy steps.
+    With runtime/integration/0001-FSR-sample-run-RDNU-through-the-FidelityFX-API.patch applied, its
+    post-build step deploys RDNU's DLL from build/windows (CMake preset "windows") as
+    amd_fidelityfx_upscaler_dx12.dll, keeping AMD's as amd_fidelityfx_upscaler_dx12_original.dll.
 
 .EXAMPLE
     pwsh runtime/tools/build_sample.ps1 -Config Release

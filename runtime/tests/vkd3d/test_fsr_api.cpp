@@ -375,6 +375,21 @@ std::vector<std::pair<uint64_t, std::string>> Queries(Gpu& gpu, uint32_t W, uint
     }
     CHECK(inside, "jitter offsets within half a pixel");
     std::printf("  ratio %.1f, quality at 4K %ux%u, %d jitter phases\n", ratio, rw, rh, phases);
+
+    // NSS reads no reactive mask; a query naming another version is that version's answer
+    ffxQueryDescUpscaleGetResourceRequirements rq{};
+    rq.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GET_RESOURCE_REQUIREMENTS;
+    CHECK(g_api.query(nullptr, &rq.header) == FFX_API_RETURN_OK && !(rq.optional_resources & FFX_API_QUERY_RESOURCE_INPUT_REACTIVEMASK),
+          "resource requirements");
+    if (!others.empty())
+    {
+        ffxOverrideVersion ov{};
+        ov.header.type  = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
+        ov.versionId    = others[0].first;
+        rq.header.pNext = &ov.header;
+        CHECK(g_api.query(nullptr, &rq.header) == FFX_API_RETURN_OK && (rq.optional_resources & FFX_API_QUERY_RESOURCE_INPUT_REACTIVEMASK),
+              "resource requirements of %s", others[0].second.c_str());
+    }
     return others;
 }
 }  // namespace

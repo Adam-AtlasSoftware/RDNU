@@ -714,7 +714,8 @@ FFX_API_ENTRY ffxReturnCode_t ffxQuery(ffxContext* context, ffxQueryDescHeader* 
     {
         if (context && Ours(*context))
             return QueryUpscaler(static_cast<Upscaler*>(*context), desc);
-        if (!context || !*context)
+        const auto* over = reinterpret_cast<const ffxOverrideVersion*>(Find(desc, FFX_API_DESC_TYPE_OVERRIDE_VERSION));
+        if ((!context || !*context) && (!over || over->versionId == kVersionId))
             return QueryUpscaler(nullptr, desc);  // context-free upscale queries
     }
     const Original* o = LoadOriginal();

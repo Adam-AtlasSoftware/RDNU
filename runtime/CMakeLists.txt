@@ -255,6 +255,23 @@ if(RDNU_DXC AND NOT CMAKE_CROSSCOMPILING)
         COMMENT "DXC over every shader; the generated NSS headers are current")
 endif()
 
+# --------------------------------------------------------------------------------- FSR sample
+
+# AMD's FSR sample with RDNU as its upscaler DLL (runtime/integration/*.patch applied to the SDK).
+if(WIN32 AND MSVC AND TARGET rdnu_ffx)
+    set(RDNU_SAMPLE_BIN "${RDNU_SDK_DIR}/Samples/Upscalers/FidelityFX_FSR/dx12/x64/$<CONFIG>")
+    add_custom_target(fsr_sample
+        COMMAND pwsh -NoProfile -File "${RDNU_ROOT}/tools/build_sample.ps1" -Config $<CONFIG>
+        DEPENDS rdnu_ffx
+        USES_TERMINAL
+        COMMENT "MSBuild: FidelityFX FSR sample ($<CONFIG>)")
+    add_custom_target(run_fsr_sample
+        COMMAND "${RDNU_SAMPLE_BIN}/FidelityFX_FSR.exe"
+        WORKING_DIRECTORY "${RDNU_SAMPLE_BIN}"
+        DEPENDS fsr_sample
+        USES_TERMINAL)
+endif()
+
 # ------------------------------------------------------------------- reference and bring-up
 
 # The fp32/INT8 reference engine and the layer harness (harness/rdnu_dx12.h); Windows only.

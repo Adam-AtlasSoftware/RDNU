@@ -1,0 +1,228 @@
+From e434b54478ccde5f711d9649f7c1c933922fef23 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 07:34:53 +0000
+Subject: [PATCH] FSR sample: run RDNU through the FidelityFX API
+
+The RDNU (AI) method now creates an FSR upscale context pinned to the
+RDNU provider, which RDNU's DLL serves as amd_fidelityfx_upscaler_dx12.dll;
+FSR picks AMD's newest version, forwarded to the original DLL. Both share
+the FSR dispatch, jitter and debug view. The post-build step deploys
+RDNU's DLL from build/windows when it is built. The RDG backend sources
+and shaders are no longer compiled or copied.
+---
+ .../dx12/FidelityFX_FSR_2022.vcxproj          | 17 +++--
+ .../dx12/FidelityFX_FSR_2022.vcxproj.filters  |  3 -
+ .../dx12/fsrapirendermodule.cpp               | 69 +++++++------------
+ .../FidelityFX_FSR/dx12/fsrapirendermodule.h  |  3 +-
+ 4 files changed, 34 insertions(+), 58 deletions(-)
+
+diff --git a/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj b/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj
+index 4eafb54..4a3609c 100644
+--- a/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj
++++ b/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj
+@@ -77,9 +77,11 @@ xcopy /y $(ProjectDir)..\..\..\..\Kits\FidelityFX\signedbin\amd_fidelityfx_upsca
+ xcopy /y $(ProjectDir)..\..\..\..\Kits\FidelityFX\signedbin\amd_fidelityfx_framegeneration_dx12.dll $(OutDir)
+ xcopy /y $(ProjectDir)..\..\..\..\Kits\FidelityFX\signedbin\amd_fidelityfx_framegeneration_dx12.pdb $(OutDir)
+ xcopy /y $(ProjectDir)..\..\..\..\Kits\Cauldron2\dx12\vcpkg_installed\x64-windows\x64-windows\bin $(OutDir)
+-xcopy /y $(ProjectDir)..\..\..\..\..\..\shaders\rdg_*.hlsl $(OutDir)
+-xcopy /y /s /i $(ProjectDir)..\..\..\..\..\..\models\RDNU_FP16 $(OutDir)RDNU_FP16
+-xcopy /y /s /i $(ProjectDir)..\..\..\..\..\..\models\RDNU_INT8 $(OutDir)RDNU_INT8</Command>
++set RDNU=$(ProjectDir)..\..\..\..\..\..\..\build\windows\runtime\$(Configuration)\amd_fidelityfx_upscaler_dx12.dll
++if exist "%RDNU%" (
++  copy /y $(OutDir)amd_fidelityfx_upscaler_dx12.dll $(OutDir)amd_fidelityfx_upscaler_dx12_original.dll
++  copy /y "%RDNU%" $(OutDir)amd_fidelityfx_upscaler_dx12.dll
++)</Command>
+     </PostBuildEvent>
+     <PostBuildEvent>
+       <Message>Copying required sample files</Message>
+@@ -116,9 +118,11 @@ xcopy /y $(ProjectDir)..\..\..\..\Kits\FidelityFX\signedbin\amd_fidelityfx_upsca
+ xcopy /y $(ProjectDir)..\..\..\..\Kits\FidelityFX\signedbin\amd_fidelityfx_framegeneration_dx12.dll $(OutDir)
+ xcopy /y $(ProjectDir)..\..\..\..\Kits\FidelityFX\signedbin\amd_fidelityfx_framegeneration_dx12.pdb $(OutDir)
+ xcopy /y $(ProjectDir)..\..\..\..\Kits\Cauldron2\dx12\vcpkg_installed\x64-windows\x64-windows\bin $(OutDir)
+-xcopy /y $(ProjectDir)..\..\..\..\..\..\shaders\rdg_*.hlsl $(OutDir)
+-xcopy /y /s /i $(ProjectDir)..\..\..\..\..\..\models\RDNU_FP16 $(OutDir)RDNU_FP16
+-xcopy /y /s /i $(ProjectDir)..\..\..\..\..\..\models\RDNU_INT8 $(OutDir)RDNU_INT8</Command>
++set RDNU=$(ProjectDir)..\..\..\..\..\..\..\build\windows\runtime\$(Configuration)\amd_fidelityfx_upscaler_dx12.dll
++if exist "%RDNU%" (
++  copy /y $(OutDir)amd_fidelityfx_upscaler_dx12.dll $(OutDir)amd_fidelityfx_upscaler_dx12_original.dll
++  copy /y "%RDNU%" $(OutDir)amd_fidelityfx_upscaler_dx12.dll
++)</Command>
+     </PostBuildEvent>
+     <PostBuildEvent>
+       <Message>Copying required sample files</Message>
+@@ -129,7 +133,6 @@ xcopy /y /s /i $(ProjectDir)..\..\..\..\..\..\models\RDNU_INT8 $(OutDir)RDNU_INT
+   </ItemDefinitionGroup>
+   <ItemGroup>
+     <ClCompile Include="fsrapirendermodule.cpp" />
+-    <ClCompile Include="..\..\..\..\..\..\src\rdg_dx12_backend.cpp" />
+     <ClCompile Include="main.cpp" />
+     <ClCompile Include="sample.cpp" />
+   </ItemGroup>
+diff --git a/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj.filters b/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj.filters
+index 68f0d39..701a0b2 100644
+--- a/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj.filters
++++ b/Samples/Upscalers/FidelityFX_FSR/dx12/FidelityFX_FSR_2022.vcxproj.filters
+@@ -23,9 +23,6 @@
+     <ClCompile Include="sample.cpp">
+       <Filter>Source Files</Filter>
+     </ClCompile>
+-    <ClCompile Include="..\..\..\..\..\rdg_dx12_backend.cpp">
+-      <Filter>Source Files</Filter>
+-    </ClCompile>
+   </ItemGroup>
+   <ItemGroup>
+     <ClInclude Include="fsrapirendermodule.h">
+diff --git a/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.cpp b/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.cpp
+index bc5fe61..15e8349 100644
+--- a/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.cpp
++++ b/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.cpp
+@@ -43,7 +43,6 @@
+ #include <cauldron2/dx12/framework/render/dx12/device_dx12.h>
+ #include <cauldron2/dx12/framework/render/dx12/commandlist_dx12.h>
+ 
+-#include "../../../../../../src/ffx_provider_rdg.h"
+ #include <FidelityFX/api/include/dx12/ffx_api_dx12.hpp>
+ #include <FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.hpp>
+ 
+@@ -419,7 +418,7 @@ void FSRRenderModule::EnableModule(bool enabled)
+             // Update FSR jitter for built in TAA
+             const ResolutionInfo &resInfo = GetFramework()->GetResolutionInfo();
+ 
+-            if (m_UpscaleMethod == Upscaler_FSRAPI) {
++            {
+               ffx::ReturnCode retCode;
+               int32_t jitterPhaseCount;
+               ffx::QueryDescUpscaleGetJitterPhaseCount getJitterPhaseDesc{};
+@@ -445,9 +444,6 @@ void FSRRenderModule::EnableModule(bool enabled)
+                   ASSERT_CRITICAL, retCode == ffx::ReturnCode::Ok,
+                   L"ffxQuery(UpscalingContext,FSR_GETJITTEROFFSET) returned %d",
+                   (uint32_t)retCode);
+-            } else {
+-              m_JitterX = 0.0f;
+-              m_JitterY = 0.0f;
+             }
+ 
+             values = Vec2(-2.f * m_JitterX / resInfo.RenderWidth,
+@@ -810,7 +806,7 @@ void FSRRenderModule::SwitchUpscaler(int32_t newUpscaler)
+       ClearReInit();
+       m_pTAARenderModule->EnableModule(false);
+       m_pToneMappingRenderModule->EnableModule(true);
+-      m_EnableMaskOptions = false; // RDNU might not need FSR masks
++      m_EnableMaskOptions = false; // NSS reads no reactive or composition mask
+       break;
+     default:
+         CauldronCritical(L"Unsupported upscaler requested.");
+@@ -981,8 +977,23 @@ void FSRRenderModule::UpdateFSRContext(bool enabled)
+ //         backendDesc.vkDeviceProcAddr = vkGetDeviceProcAddr;
+ #endif //defined(FFX_API_VK)
+ 
+-        if (m_UpscaleMethod == Upscaler_FSRAPI)
++        if (m_UpscaleMethod == Upscaler_FSRAPI || m_UpscaleMethod == Upscaler_RDNU)
+         {
++            // RDNU (AI) is the RDNU provider in amd_fidelityfx_upscaler_dx12.dll; FSR is AMD's
++            // newest, forwarded to amd_fidelityfx_upscaler_dx12_original.dll, unless overridden.
++            if (!m_overrideVersion)
++            {
++                for (uint32_t i = 0; i < m_FsrVersionNames.size(); i++)
++                {
++                    const bool rdnu = strncmp(m_FsrVersionNames[i], "RDNU", 4) == 0;
++                    if (rdnu == (m_UpscaleMethod == Upscaler_RDNU))
++                    {
++                        m_FsrVersionIndex = i;
++                        break;
++                    }
++                }
++            }
++
+             ffx::CreateContextDescUpscale createFsr{};
+             ffx::ReturnCode retCode;
+             ffxReturnCode_t retCode_t;
+@@ -1085,17 +1096,6 @@ void FSRRenderModule::UpdateFSRContext(bool enabled)
+                     m_FsrVersionIndex = i;
+                 }
+             }
+-        } else if (m_UpscaleMethod == Upscaler_RDNU) {
+-          ffxCreateContextDescUpscale createFsr{};
+-          createFsr.maxRenderSize = {resInfo.RenderWidth, resInfo.RenderHeight};
+-          createFsr.maxUpscaleSize = {resInfo.UpscaleWidth,
+-                                      resInfo.UpscaleHeight};
+-
+-          ffxReturnCode_t retCode = ffxCreateContextDescRDG(
+-              &createFsr, GetDevice()->GetImpl()->DX12Device(), &m_RDGContext);
+-          CauldronAssert(ASSERT_CRITICAL, retCode == FFX_API_RETURN_OK,
+-                         L"Couldn't create the RDG Context: %d",
+-                         (uint32_t)retCode);
+         }
+ 
+         //query FG Swapchain VRAM size
+@@ -1271,11 +1271,6 @@ void FSRRenderModule::UpdateFSRContext(bool enabled)
+             ffx::DestroyContext(m_UpscalingContext);
+             m_UpscalingContext = nullptr;
+         }
+-
+-        if (m_RDGContext) {
+-          ffxDestroyContextRDG(m_RDGContext);
+-          m_RDGContext = nullptr;
+-        }
+     }
+     
+ }
+@@ -1477,16 +1472,9 @@ void FSRRenderModule::Execute(double deltaTime, CommandList* pCmdList)
+             dispatchUpscale.transparencyAndComposition = SDKWrapper::ffxGetResourceApi(nullptr, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
+         }
+ 
+-        // Jitter is calculated earlier in the frame using a callback from the
+-        // camera update FSR expects inverted jitter, but RDNU expects raw
+-        // Halton values
+-        if (m_UpscaleMethod == Upscaler_RDNU) {
+-          dispatchUpscale.jitterOffset.x = m_JitterX;
+-          dispatchUpscale.jitterOffset.y = m_JitterY;
+-        } else {
+-          dispatchUpscale.jitterOffset.x = -m_JitterX;
+-          dispatchUpscale.jitterOffset.y = -m_JitterY;
+-        }
++        // Jitter is calculated earlier in the frame using a callback from the camera update
++        dispatchUpscale.jitterOffset.x = -m_JitterX;
++        dispatchUpscale.jitterOffset.y = -m_JitterY;
+         dispatchUpscale.motionVectorScale.x = resInfo.fRenderWidth();
+         dispatchUpscale.motionVectorScale.y = resInfo.fRenderHeight();
+         dispatchUpscale.reset = m_ResetUpscale || GetScene()->GetCurrentCamera()->WasCameraReset();
+@@ -1520,19 +1508,8 @@ void FSRRenderModule::Execute(double deltaTime, CommandList* pCmdList)
+         dispatchUpscale.flags |= m_colorSpace == FSRColorSpace::sRGBColorSpace ? FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB : 0;
+         dispatchUpscale.flags |= m_colorSpace == FSRColorSpace::PQColorSpace ? FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ : 0;
+ 
+-        if (m_UpscaleMethod == Upscaler_RDNU) {
+-          ffxReturnCode_t retCode =
+-              ffxDispatchDescRDG(m_RDGContext, &dispatchUpscale);
+-          CauldronAssert(ASSERT_CRITICAL, retCode == FFX_API_RETURN_OK,
+-                         L"Dispatching RDNU upscaling failed: %d",
+-                         (uint32_t)retCode);
+-        } else {
+-          ffx::ReturnCode retCode =
+-              ffx::Dispatch(m_UpscalingContext, dispatchUpscale);
+-          CauldronAssert(ASSERT_CRITICAL, !!retCode,
+-                         L"Dispatching FSR upscaling failed: %d",
+-                         (uint32_t)retCode);
+-        }
++        ffx::ReturnCode retCode = ffx::Dispatch(m_UpscalingContext, dispatchUpscale);
++        CauldronAssert(ASSERT_CRITICAL, !!retCode, L"Dispatching FSR upscaling failed: %d", (uint32_t)retCode);
+     }
+ 
+     if (m_FrameInterpolationAvailable)
+diff --git a/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.h b/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.h
+index 05c682a..58069f8 100644
+--- a/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.h
++++ b/Samples/Upscalers/FidelityFX_FSR/dx12/fsrapirendermodule.h
+@@ -223,8 +223,7 @@ private:
+     ffx::Context m_FrameGenContext  = nullptr;
+     ffx::Context m_SwapChainContext = nullptr;
+     ffx::ConfigureDescFrameGeneration m_FrameGenerationConfig{};
+-    
+-    struct RDGContext* m_RDGContext = nullptr;
++
+ 
+     // Backup UI elements
+     std::vector<cauldron::UIElement*> m_UIElements{}; // weak ptr
+-- 
+2.43.0
+
