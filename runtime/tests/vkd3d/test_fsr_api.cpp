@@ -194,8 +194,9 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
     {
         const bool     small = t >= o.smallFrom;
         const uint32_t rw = small ? SW : W, rh = small ? SH : H, dw = 2 * rw, dh = 2 * rh;
-        const float    jx = f.jitter->data[t * 2], jy = f.jitter->data[t * 2 + 1];
-        const float    pjx = t ? f.jitter->data[t * 2 - 2] : 0, pjy = t ? f.jitter->data[t * 2 - 1] : 0;
+        // the API takes FSR's jitter, the negative of NSS's (and the dataset's)
+        const float    jx = -f.jitter->data[t * 2], jy = -f.jitter->data[t * 2 + 1];
+        const float    pjx = t ? -f.jitter->data[t * 2 - 2] : 0, pjy = t ? -f.jitter->data[t * 2 - 1] : 0;
         const float    ex  = f.exposure->data[t];
 
         std::vector<uint16_t> col(size_t(rw) * rh * 4);

@@ -3,7 +3,8 @@
 
 The dataset stores motion as (y, x) pixels pointing forward in time and jitter as (y, x);
 the SDK passes read motion as (x, y) with reproj = uv + motion / size. Both are converted
-here, so the test feeds the passes exactly what a game would through the SDK.
+here, so the test feeds the passes exactly what a game would through the SDK. The jitter is
+NSS's; FSR's is its negative.
 
     python3 runtime/tools/nss_pass_frames.py <sequence.safetensors> [--frames 8] [--size 124x116]
         [--out runtime/tools/golden/nss_frames.rdnut]

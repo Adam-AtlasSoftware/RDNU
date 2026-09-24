@@ -366,7 +366,8 @@ ffxReturnCode_t DispatchUpscale(Upscaler* u, const ffxDispatchDescUpscale* d)
     n.motionVectors          = motion;
     n.output                 = sharpen ? ffxGetResourceDX12(target, FFX_RESOURCE_STATE_GENERIC_UAV, "rdnu_sharpen_input")
                                        : Resource(d->output, "output");
-    n.jitterOffset           = {d->jitterOffset.x, d->jitterOffset.y};
+    // NSS's jitter is FSR's negated: on the same frames each loses ~4 dB with the other's sign
+    n.jitterOffset           = {-d->jitterOffset.x, -d->jitterOffset.y};
     n.motionVectorScale      = mvScale;
     n.renderSize             = {render.width, render.height};
     n.upscaleSize            = {upscale.width, upscale.height};
