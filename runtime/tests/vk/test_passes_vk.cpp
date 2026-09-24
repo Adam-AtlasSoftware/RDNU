@@ -544,7 +544,8 @@ int main(int argc, char** argv)
 
     NetRunner net{vk, manifest, plan};
     net.shaderDir = kSrc + "/runtime/shaders/net";
-    net.Allocate(blob, GW, GH);
+    if (!net.Allocate(blob, GW, GH, err))
+        return std::printf("%s\n", err.c_str()), 1;
 
     auto make = [&](uint32_t w, uint32_t h, Fmt f) { return Tex{vk.CreateImage(w, h, VkFmt(f), TexelBytes(f)), f}; };
     Tex tColour = make(W, H, Fmt::RGBA16F), tDepth = make(W, H, Fmt::R32F), tMotion = make(W, H, Fmt::RG16F);

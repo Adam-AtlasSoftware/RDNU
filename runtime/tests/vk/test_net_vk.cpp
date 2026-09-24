@@ -160,7 +160,8 @@ int main(int argc, char** argv)
 
     NetRunner r{vk, manifest, plan};
     r.shaderDir = std::string(RDNU_SOURCE_DIR) + "/runtime/shaders/net";
-    r.Allocate(blob, W, H);
+    if (!r.Allocate(blob, W, H, err))
+        return std::printf("%s\n", err.c_str()), 1;
 
     bool ok = true;
     WriteInput(r, in);
