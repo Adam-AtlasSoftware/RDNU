@@ -89,7 +89,8 @@ layout(location = NSS_BIND_RENDER_TARGET_NEAREST_DEPTH_COORD) out FfxFloat32x4 r
 layout(set = 0, binding = NSS_BIND_PREPROCESS_INPUT_TENSOR) uniform tensorARM<tensor_t, 4> rw_preprocessed_tensor;
 #define _PreprocessTensor rw_preprocessed_tensor
 #else
-RWByteAddressBuffer rw_preprocessed_tensor_buffer : RDNU_REG_U(NSS_BIND_PREPROCESS_INPUT_TENSOR);
+RWByteAddressBuffer PreprocessInputTensorBuffer : RDNU_REG_U(NSS_BIND_PREPROCESS_INPUT_TENSOR);
+#define rw_preprocessed_tensor_buffer PreprocessInputTensorBuffer
 #endif
 #endif
 

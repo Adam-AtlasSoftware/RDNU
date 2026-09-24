@@ -80,10 +80,11 @@ DECLS = [
      r"RWTexture2D<float4> \2 : RDNU_REG_U(\1);"),
     (r"layout\(set = 0, binding = (\w+), std140\) uniform (\w+)\n\{(.*?)\}\n(\w+);",
      r"struct \2\n{\3};\nConstantBuffer<\2> \4 : RDNU_REG_B(\1);"),
-    (r"layout\(set = 0, binding = (\w+), std430\) readonly buffer \w+\n\{\n\s*int8_t4 data\[\];\n\}\n(\w+);",
-     r"ByteAddressBuffer \2 : RDNU_REG_T(\1);"),
-    (r"layout\(set = 0, binding = (\w+), std430\) buffer \w+\n\{\n\s*int8_t4 data\[\];\n\}\n(\w+);",
-     r"RWByteAddressBuffer \2 : RDNU_REG_U(\1);"),
+    # tensor buffers keep the GLSL block name: the component binds them by that name
+    (r"layout\(set = 0, binding = (\w+), std430\) readonly buffer (\w+)\n\{\n\s*int8_t4 data\[\];\n\}\n(\w+);",
+     r"ByteAddressBuffer \2 : RDNU_REG_T(\1);\n#define \3 \2"),
+    (r"layout\(set = 0, binding = (\w+), std430\) buffer (\w+)\n\{\n\s*int8_t4 data\[\];\n\}\n(\w+);",
+     r"RWByteAddressBuffer \2 : RDNU_REG_U(\1);\n#define \3 \2"),
 ]
 
 

@@ -13,6 +13,7 @@
 #include "net_runner.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -511,7 +512,7 @@ int main(int argc, char** argv)
         return std::printf("%s (run runtime/tools/nss_pass_frames.py)\n", err.c_str()), 1;
 
     const rdnut::Tensor &colour = seq.at("colour"), &depth = seq.at("depth"), &motion = seq.at("motion");
-    const rdnut::Tensor &jitter = seq.at("jitter"), &exposure = seq.at("exposure"), &dtv = seq.at("device_to_view");
+    const rdnut::Tensor &jitter = seq.at("jitter"), &exposure = seq.at("exposure"), &camera = seq.at("camera");
     const rdnut::Tensor& truth = seq.at("truth");
     frames = std::min(frames, colour.dims[0]);
     const uint32_t W = colour.dims[2], H = colour.dims[1];
@@ -597,7 +598,17 @@ int main(int argc, char** argv)
         const bool  reset = t == 0;
         NssConstants prev = c;
         c = NssConstants{};
-        std::memcpy(c.deviceToViewDepth, &dtv.data[t * 4], 16);
+        {
+            // setupDeviceDepthToViewSpaceDepthParams in ffx_nss.cpp, depth not inverted
+            const float zn = camera.data[t * 4], zf = camera.data[t * 4 + 1], fov = camera.data[t * 4 + 2];
+            const bool  infinite = camera.data[t * 4 + 3] != 0;
+            const float lo = std::min(zn, zf), hi = std::max(zn, zf), q = hi / (lo - hi);
+            const float cot = std::cos(0.5f * fov) / std::sin(0.5f * fov);
+            c.deviceToViewDepth[0] = -(infinite ? -1.0f - FLT_EPSILON : q);
+            c.deviceToViewDepth[1] = infinite ? -lo - FLT_EPSILON : q * lo;
+            c.deviceToViewDepth[2] = 1.0f / (cot / (float(W) / float(H)));
+            c.deviceToViewDepth[3] = 1.0f / cot;
+        }
         const float jo[4] = {jx, jy, jx / W, jy / H};
         std::memcpy(c.jitterOffset, jo, 16);
         std::memcpy(c.jitterOffsetTm1, reset ? jo : prev.jitterOffset, 16);

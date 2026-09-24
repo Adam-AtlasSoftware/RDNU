@@ -59,7 +59,10 @@ def main():
         "motion": -motion[..., ::-1],
         "jitter": jitter[:, ::-1],
         "exposure": np.exp(f.get_tensor("exposure")[t].reshape(-1)),
-        "device_to_view": f.get_tensor("depth_params")[t].reshape(-1, 4),
+        # near, far, vertical fov, infinite far plane: what a game passes to the SDK
+        "camera": np.stack([f.get_tensor("zNear")[t].reshape(-1), f.get_tensor("zFar")[t].reshape(-1),
+                            f.get_tensor("FovY")[t].reshape(-1),
+                            f.get_tensor("infinite_zFar")[t].reshape(-1).astype(np.float32)], -1),
         "truth": np.concatenate([truth, np.ones(truth.shape[:3] + (1,), np.float32)], -1),
     }
     pathlib.Path(args.out).parent.mkdir(parents=True, exist_ok=True)

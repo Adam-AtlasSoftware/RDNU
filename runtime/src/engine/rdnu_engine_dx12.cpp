@@ -1,6 +1,6 @@
 // rdnu_engine_dx12.cpp - see rdnu_engine_dx12.h
 #include "rdnu_engine_dx12.h"
-#include "rdnu_shader_blobs.h"
+#include "rdnu_embedded.h"
 
 #include <cstring>
 

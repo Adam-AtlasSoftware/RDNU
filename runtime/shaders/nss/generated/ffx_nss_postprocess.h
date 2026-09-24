@@ -190,7 +190,8 @@ half4 Tonemap4(half4 x)
 // NSS v1: cannot use image alias (too many channels). Use native tensor ops or buffer alias (SSBO).
 #if !NSS_SUPPORT_TENSOR
 // Buffer alias path: tensor aliased as a std430 SSBO — read via linear NHWC indexing.
-ByteAddressBuffer r_coefficients_kpn_buffer : RDNU_REG_T(NSS_BIND_KPN_TENSOR);
+ByteAddressBuffer KpnCoeffBuffer : RDNU_REG_T(NSS_BIND_KPN_TENSOR);
+#define r_coefficients_kpn_buffer KpnCoeffBuffer
 #else
 // Native tensor path: read via tensorReadARM.
 layout(set = 0, binding = NSS_BIND_KPN_TENSOR) uniform readonly tensorARM<tensor_t, 4> r_coefficients_kpn_tensor;

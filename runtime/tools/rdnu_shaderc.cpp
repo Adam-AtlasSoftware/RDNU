@@ -1,10 +1,11 @@
-// rdnu_shaderc.cpp - compiles every shader the runtime needs to DXIL and writes them into one
-// C++ source (rdnu::FindShader). Network kernels come from the model manifest, pass shaders
-// from rdnu_pass_shaders.h. Runs on Windows and Linux with any DXC; the wave-matrix kernels
-// need the AMD shader intrinsics headers (FidelityFX SDK, api/internal/dx12/AmdExtD3D).
+// rdnu_shaderc.cpp - compiles every shader the runtime needs to DXIL and writes them, with the
+// model files, into one C++ source (rdnu_embedded.h). Network kernels come from the model
+// manifest, pass shaders from rdnu_pass_shaders.h. Runs on Windows and Linux with any DXC; the
+// wave-matrix kernels need the AMD shader intrinsics headers (FidelityFX SDK,
+// api/internal/dx12/AmdExtD3D).
 //
-//   rdnu_shaderc --dxc <dxc> --shaders <runtime/shaders> --manifest <nss.rdnm>
-//                --amd-ext <AmdExtD3D dir> --out <rdnu_shaders_dxil.cpp> [--no-wmma]
+//   rdnu_shaderc --dxc <dxc> --shaders <runtime/shaders> --model <dir with nss.rdnm, nss_w8.bin>
+//                --amd-ext <AmdExtD3D dir> --out <rdnu_embedded.cpp> [--no-wmma]
 #include "../src/engine/rdnu_engine_core.h"
 #include "../src/engine/rdnu_pass_shaders.h"
 
@@ -41,9 +42,58 @@ struct Job
     std::vector<std::string> defines, includes, flags;
 };
 
-bool Compile(const std::string& dxc, const std::string& tmp, const Job& j, std::vector<unsigned char>& dxil)
+struct Binding
 {
-    const std::string out = tmp + "/" + j.name + ".dxil", log = tmp + "/" + j.name + ".log";
+    std::string name, kind;
+    unsigned    slot;
+};
+
+// Parses the "Resource Bindings" table of a DXC listing: only resources the shader uses.
+bool ParseBindings(const std::string& listing, std::vector<Binding>& out)
+{
+    std::ifstream f(listing);
+    std::string   line;
+    bool          table = false;
+    while (std::getline(f, line))
+    {
+        if (line.rfind("; Resource Bindings:", 0) == 0)
+        {
+            table = true;
+            continue;
+        }
+        if (!table)
+            continue;
+        std::istringstream ss(line.substr(1));
+        std::string        name, type, format, dim, id, bind, count;
+        if (!(ss >> name >> type >> format >> dim >> id >> bind >> count))
+        {
+            if (line.size() <= 1 && !out.empty())
+                break;
+            continue;
+        }
+        if (name == "Name" || name[0] == '-')
+            continue;
+        const char* kind = nullptr;
+        size_t      digits = bind.find_first_of("0123456789");
+        if (type == "cbuffer")
+            kind = "Cbv";
+        else if (type == "sampler")
+            kind = "Sampler";
+        else if (type == "texture")
+            kind = dim == "r/o" || dim == "buf" ? "SrvBuffer" : "SrvTexture";
+        else if (type == "UAV")
+            kind = dim == "r/w" || dim == "buf" ? "UavBuffer" : "UavTexture";
+        if (!kind || digits == std::string::npos)
+            return false;
+        out.push_back({name, kind, unsigned(std::stoul(bind.substr(digits)))});
+    }
+    return true;
+}
+
+bool Compile(const std::string& dxc, const std::string& tmp, const Job& j, std::vector<unsigned char>& dxil,
+             std::vector<Binding>& bindings)
+{
+    const std::string out = tmp + "/" + j.name + ".dxil", log = tmp + "/" + j.name + ".log", lst = tmp + "/" + j.name + ".lst";
     std::ostringstream cmd;
     cmd << Quote(dxc) << " -T " << j.profile << " -E main -HV 2021 -O3 -enable-16bit-types";
     for (const std::string& f : j.flags)
@@ -52,12 +102,12 @@ bool Compile(const std::string& dxc, const std::string& tmp, const Job& j, std::
         cmd << " -D " << Quote(d);
     for (const std::string& i : j.includes)
         cmd << " -I " << Quote(i);
-    cmd << " " << Quote(j.file) << " -Fo " << Quote(out) << " > " << Quote(log) << " 2>&1";
+    cmd << " " << Quote(j.file) << " -Fo " << Quote(out) << " -Fc " << Quote(lst) << " > " << Quote(log) << " 2>&1";
     std::string c = cmd.str();
 #ifdef _WIN32
     c = "\"" + c + "\"";  // cmd.exe strips one level of quotes
 #endif
-    if (std::system(c.c_str()) != 0 || !ReadAll(out, dxil))
+    if (std::system(c.c_str()) != 0 || !ReadAll(out, dxil) || !ParseBindings(lst, bindings))
     {
         std::vector<unsigned char> l;
         ReadAll(log, l);
@@ -70,7 +120,7 @@ bool Compile(const std::string& dxc, const std::string& tmp, const Job& j, std::
 
 int main(int argc, char** argv)
 {
-    std::string dxc, shaders, manifestPath, amdExt, out;
+    std::string dxc, shaders, modelDir, amdExt, out;
     bool        wmma = true;
     for (int i = 1; i < argc; ++i)
     {
@@ -78,19 +128,23 @@ int main(int argc, char** argv)
         auto next = [&](std::string& v) { if (i + 1 < argc) v = argv[++i]; };
         if (a == "--dxc") next(dxc);
         else if (a == "--shaders") next(shaders);
-        else if (a == "--manifest") next(manifestPath);
+        else if (a == "--model") next(modelDir);
         else if (a == "--amd-ext") next(amdExt);
         else if (a == "--out") next(out);
         else if (a == "--no-wmma") wmma = false;
     }
-    if (dxc.empty() || shaders.empty() || manifestPath.empty() || out.empty() || (wmma && amdExt.empty()))
-        return std::fprintf(stderr, "usage: rdnu_shaderc --dxc <dxc> --shaders <dir> --manifest <nss.rdnm> --amd-ext <dir> --out <file> [--no-wmma]\n"), 1;
+    if (dxc.empty() || shaders.empty() || modelDir.empty() || out.empty() || (wmma && amdExt.empty()))
+        return std::fprintf(stderr, "usage: rdnu_shaderc --dxc <dxc> --shaders <dir> --model <dir> --amd-ext <dir> --out <file> [--no-wmma]\n"), 1;
 
-    std::vector<unsigned char> bytes;
-    std::string                err;
-    rdnu::Manifest             manifest;
-    if (!ReadAll(manifestPath, bytes) || !rdnu::ParseManifest(bytes.data(), bytes.size(), manifest, err))
-        return std::fprintf(stderr, "rdnu_shaderc: %s: %s\n", manifestPath.c_str(), err.c_str()), 1;
+    const char* modelFiles[] = {"nss.rdnm", "nss_w8.bin"};
+    std::vector<unsigned char> model[2];
+    for (int i = 0; i < 2; ++i)
+        if (!ReadAll(modelDir + "/" + modelFiles[i], model[i]))
+            return std::fprintf(stderr, "rdnu_shaderc: cannot read %s/%s\n", modelDir.c_str(), modelFiles[i]), 1;
+    std::string    err;
+    rdnu::Manifest manifest;
+    if (!rdnu::ParseManifest(model[0].data(), model[0].size(), manifest, err))
+        return std::fprintf(stderr, "rdnu_shaderc: nss.rdnm: %s\n", err.c_str()), 1;
     rdnu::PlanConfig cfg;
     cfg.maxWidth = cfg.maxHeight = 64;
     rdnu::Plan plan;
@@ -126,24 +180,41 @@ int main(int argc, char** argv)
 #endif
     if (std::system(mkdir.c_str())) {}  // exists already, or Compile reports the failure
     std::ostringstream src;
-    src << "// Generated by rdnu_shaderc. Do not edit.\n#include \"rdnu_shader_blobs.h\"\n\n#include <cstring>\n\nnamespace\n{\n";
-    size_t total = 0;
+    src << "// Generated by rdnu_shaderc. Do not edit.\n#include \"rdnu_embedded.h\"\n\n#include <cstring>\n\nnamespace\n{\n";
+    auto bytes = [&](const char* name, const std::vector<unsigned char>& data) {
+        src << "const unsigned char " << name << "[] = {";
+        for (size_t b = 0; b < data.size(); ++b)
+            src << (b % 24 ? "" : "\n    ") << unsigned(data[b]) << ",";
+        src << "\n};\n";
+    };
+    bytes("kModel0", model[0]);
+    bytes("kModel1", model[1]);
+    size_t              total = 0;
+    std::vector<size_t> counts;
     for (size_t i = 0; i < jobs.size(); ++i)
     {
         std::vector<unsigned char> dxil;
-        if (!Compile(dxc, tmp, jobs[i], dxil))
+        std::vector<Binding>       bindings;
+        if (!Compile(dxc, tmp, jobs[i], dxil, bindings))
             return 2;
         total += dxil.size();
-        src << "const unsigned char kBlob" << i << "[] = {";
-        for (size_t b = 0; b < dxil.size(); ++b)
-            src << (b % 24 ? "" : "\n    ") << unsigned(dxil[b]) << ",";
-        src << "\n};\n";
+        bytes(("kBlob" + std::to_string(i)).c_str(), dxil);
+        src << "const rdnu::ShaderBinding kBindings" << i << "[] = {\n";
+        for (const Binding& b : bindings)
+            src << "    {\"" << b.name << "\", rdnu::BindingKind::" << b.kind << ", " << b.slot << "},\n";
+        src << "    {nullptr, rdnu::BindingKind::Cbv, 0}};\n";
+        counts.push_back(bindings.size());
     }
     src << "const rdnu::ShaderBlob kShaders[] = {\n";
     for (size_t i = 0; i < jobs.size(); ++i)
-        src << "    {\"" << jobs[i].name << "\", kBlob" << i << ", sizeof(kBlob" << i << ")},\n";
-    src << "};\n}  // namespace\n\nconst rdnu::ShaderBlob* rdnu::FindShader(const char* name)\n{\n"
+        src << "    {\"" << jobs[i].name << "\", kBlob" << i << ", sizeof(kBlob" << i << "), kBindings" << i << ", " << counts[i] << "},\n";
+    src << "};\nconst rdnu::EmbeddedFile kModel[] = {\n    {\"nss.rdnm\", kModel0, sizeof(kModel0)},\n"
+        << "    {\"nss_w8.bin\", kModel1, sizeof(kModel1)},\n};\n}  // namespace\n\n"
+        << "const rdnu::ShaderBlob* rdnu::FindShader(const char* name)\n{\n"
         << "    for (const ShaderBlob& s : kShaders)\n        if (!std::strcmp(s.name, name))\n            return &s;\n"
+        << "    return nullptr;\n}\n\n"
+        << "const rdnu::EmbeddedFile* rdnu::FindModelFile(const char* name)\n{\n"
+        << "    for (const EmbeddedFile& f : kModel)\n        if (!std::strcmp(f.name, name))\n            return &f;\n"
         << "    return nullptr;\n}\n";
     std::ofstream f(out, std::ios::binary);
     f << src.str();
