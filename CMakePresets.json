@@ -4,28 +4,33 @@
   "configurePresets": [
     {
       "name": "windows",
-      "displayName": "Windows x64 (MSVC / Ninja Multi-Config)",
-      "description": "Configure from a VS Developer environment, or let the CMake Tools 'Visual Studio ... amd64' kit set the MSVC toolchain.",
+      "displayName": "Windows x64 (MSVC, Ninja Multi-Config)",
+      "description": "The FidelityFX API DLL, the harnesses and the core tests. Configure from a VS developer environment.",
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build/windows",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
-      "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
-        "RDNU_BUILD_TESTS": "ON",
-        "RDNU_VALIDATE_SHADERS": "ON"
-      }
+      "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Debug;Release" }
     },
     {
       "name": "linux",
-      "displayName": "Linux x64 (GCC/Clang / Ninja Multi-Config)",
-      "description": "Cross-platform runtime work (Vulkan/CUDA backend is WIP). The Windows-only DX12 sample and smoke tests are disabled here.",
+      "displayName": "Linux x64 (Ninja Multi-Config)",
+      "description": "rdnu_shaderc and the tests; the D3D12 tests run on lavapipe when RDNU_VKD3D_DIR is set.",
       "generator": "Ninja Multi-Config",
       "binaryDir": "${sourceDir}/build/linux",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": { "CMAKE_CONFIGURATION_TYPES": "Debug;Release" }
+    },
+    {
+      "name": "mingw",
+      "displayName": "Windows x64 DLL from Linux (MinGW-w64)",
+      "description": "Cross build of the FidelityFX API DLL. Build the linux preset first for rdnu_shaderc.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/mingw",
+      "toolchainFile": "${sourceDir}/cmake/mingw-w64.cmake",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "cacheVariables": {
-        "RDNU_BUILD_TESTS": "OFF",
-        "RDNU_VALIDATE_SHADERS": "ON",
-        "RDNU_BACKEND_VULKAN": "OFF"
+        "CMAKE_BUILD_TYPE": "Release",
+        "RDNU_SHADERC": "${sourceDir}/build/linux/runtime/Release/rdnu_shaderc"
       }
     }
   ],
@@ -33,6 +38,10 @@
     { "name": "windows-debug",   "configurePreset": "windows", "configuration": "Debug" },
     { "name": "windows-release", "configurePreset": "windows", "configuration": "Release" },
     { "name": "linux-debug",     "configurePreset": "linux",   "configuration": "Debug" },
-    { "name": "linux-release",   "configurePreset": "linux",   "configuration": "Release" }
+    { "name": "linux-release",   "configurePreset": "linux",   "configuration": "Release" },
+    { "name": "mingw",           "configurePreset": "mingw" }
+  ],
+  "testPresets": [
+    { "name": "linux-release", "configurePreset": "linux", "configuration": "Release", "output": { "outputOnFailure": true } }
   ]
 }

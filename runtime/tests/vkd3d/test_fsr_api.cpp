@@ -5,8 +5,10 @@
 // definitions say they must. One run goes through the provider object the way FidelityFX SDK
 // 2's loader does (api/internal/ffx_provider.h).
 //
-//   test_fsr_api <golden dir> [--frames N]
+//   test_fsr_api <golden dir> [--frames N] [--dll file]
 //
+// On Windows --dll drives a DLL instead of the linked provider: amd_fidelityfx_dx12.dll, or
+// AMD's amd_fidelityfx_loader_dx12.dll with RDNU as amd_fidelityfx_upscaler_dx12.dll beside it.
 // <golden dir>/nss_frames.rdnut comes from runtime/tools/nss_pass_frames.py. On vkd3d-proton
 // set VKD3D_SHADER_MODEL=6_6 (see runtime/tools/setup_vkd3d_proton.sh).
 #include "../common/rdnut.h"
@@ -16,8 +18,10 @@
 
 #include <dx12/ffx_api_dx12.h>
 #include <ffx_api.h>
-#include <ffx_provider.h>
 #include <ffx_upscale.h>
+#ifndef _WIN32
+#include <ffx_provider.h>  // MSVC's layout on Windows: the real loader tests it there
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +47,50 @@ int g_failures = 0;
         }                                                       \
     } while (0)
 
+struct Api
+{
+    PfnFfxCreateContext  create    = ffxCreateContext;
+    PfnFfxDestroyContext destroy   = ffxDestroyContext;
+    PfnFfxConfigure      configure = ffxConfigure;
+    PfnFfxQuery          query     = ffxQuery;
+    PfnFfxDispatch       dispatch  = ffxDispatch;
+} g_api;
+
+#ifndef _WIN32
+// What AMD's SDK 2 loader does after creation: call the provider object the context starts with.
+const ffxProvider* ProviderOf(ffxContext* c)
+{
+    return reinterpret_cast<const InternalContextHeader*>(*c)->provider;
+}
+
+const Api kViaProvider = {
+    ffxCreateContext,
+    [](ffxContext* c, const ffxAllocationCallbacks* m) {
+        Allocator a{m};
+        return ProviderOf(c)->DestroyContext(c, a);
+    },
+    [](ffxContext* c, const ffxConfigureDescHeader* d) { return ProviderOf(c)->Configure(c, d); },
+    [](ffxContext* c, ffxQueryDescHeader* d) { return ProviderOf(c)->Query(c, d); },
+    [](ffxContext* c, const ffxDispatchDescHeader* d) { return ProviderOf(c)->Dispatch(c, d); },
+};
+#endif
+
+#ifdef _WIN32
+template <typename T>
+bool Proc(HMODULE m, const char* name, T& out)
+{
+    out = reinterpret_cast<T>(reinterpret_cast<void (*)()>(GetProcAddress(m, name)));
+    return out != nullptr;
+}
+
+bool LoadApi(const char* dll)
+{
+    HMODULE m = LoadLibraryA(dll);
+    return m && Proc(m, "ffxCreateContext", g_api.create) && Proc(m, "ffxDestroyContext", g_api.destroy) &&
+           Proc(m, "ffxConfigure", g_api.configure) && Proc(m, "ffxQuery", g_api.query) && Proc(m, "ffxDispatch", g_api.dispatch);
+}
+#endif
+
 void Message(uint32_t type, const wchar_t* m)
 {
     if (type == FFX_API_MESSAGE_TYPE_ERROR)
@@ -60,7 +108,8 @@ struct Options
     bool     displayMv  = false;  // vectors at display resolution
     uint32_t smallFrom  = ~0u;    // first frame rendered at the small size
     uint32_t first      = 0;
-    bool     viaLoader  = false;  // dispatch and destroy through the context's provider object
+    bool     viaLoader  = false;  // everything after creation through the context's provider object (not on Windows)
+    uint64_t version    = 0;      // another provider through FFX_API_DESC_TYPE_OVERRIDE_VERSION
 };
 
 struct Frames
@@ -107,8 +156,18 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
     be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
     be.device      = gpu.device;
     cu.header.pNext = &be.header;
+    ffxOverrideVersion ov{};
+    ov.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
+    ov.versionId   = o.version;
+    if (o.version)
+        be.header.pNext = &ov.header;
     ffxContext ctx  = nullptr;
-    if (ffxCreateContext(&ctx, &cu.header, nullptr) != FFX_API_RETURN_OK)
+#ifdef _WIN32
+    const Api& api = g_api;
+#else
+    const Api& api = o.viaLoader ? kViaProvider : g_api;
+#endif
+    if (api.create(&ctx, &cu.header, nullptr) != FFX_API_RETURN_OK)
         return std::printf("  ffxCreateContext failed\n"), r;
 
     const D3D12_RESOURCE_STATES read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -122,10 +181,12 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
                                 gpu.Texture(SW, SH, DXGI_FORMAT_R32_TYPELESS, false, read),
                                 gpu.Texture(SW, SH, DXGI_FORMAT_R32G32_FLOAT, false, read)};
 
-    const ffxProvider* loader = o.viaLoader ? reinterpret_cast<const InternalContextHeader*>(ctx)->provider : nullptr;
-    if (loader)
-        CHECK(loader->CanProvide(FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE) && !std::strncmp(loader->GetVersionName(), "RDNU", 4),
+#ifndef _WIN32
+    if (o.viaLoader)
+        CHECK(ProviderOf(&ctx)->CanProvide(FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE) &&
+                  !std::strncmp(ProviderOf(&ctx)->GetVersionName(), "RDNU", 4),
               "provider object");
+#endif
 
     const size_t np = size_t(W) * H;
     r.ok            = true;
@@ -187,7 +248,7 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
         dd.cameraFar              = f.camera->data[t * 4 + 1];
         // the crop keeps the pixel pitch, so its vertical field of view shrinks
         dd.cameraFovAngleVertical = 2 * std::atan(std::tan(f.camera->data[t * 4 + 2] / 2) * float(rh) / float(H));
-        if ((loader ? loader->Dispatch(&ctx, &dd.header) : ffxDispatch(&ctx, &dd.header)) != FFX_API_RETURN_OK)
+        if (api.dispatch(&ctx, &dd.header) != FFX_API_RETURN_OK)
         {
             std::printf("  ffxDispatch failed at frame %u\n", t);
             r.ok = false;
@@ -218,11 +279,9 @@ Result Run(Gpu& gpu, const Frames& f, const Options& o)
         ffxQueryDescUpscaleGetGPUMemoryUsage qm{};
         qm.header.type            = FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE;
         qm.gpuMemoryUsageUpscaler = &mu;
-        CHECK((loader ? loader->Query(&ctx, &qm.header) : ffxQuery(&ctx, &qm.header)) == FFX_API_RETURN_OK && mu.totalUsageInBytes > 0,
-              "GPU memory query");
+        CHECK(api.query(&ctx, &qm.header) == FFX_API_RETURN_OK && mu.totalUsageInBytes > 0, "GPU memory query");
     }
-    Allocator alloc{nullptr};
-    CHECK((loader ? loader->DestroyContext(&ctx, alloc) : ffxDestroyContext(&ctx, nullptr)) == FFX_API_RETURN_OK && !ctx, "destroy");
+    CHECK(api.destroy(&ctx, nullptr) == FFX_API_RETURN_OK, "destroy");
     for (ID3D12Resource* x : {tColour, tDepth, tMotion, tExp, tOutput, tSmall[0], tSmall[1], tSmall[2]})
         x->Release();
     return r;
@@ -251,7 +310,8 @@ double Agreement(const Result& a, const Result& b, size_t offsetA, const Frames&
     return worst;
 }
 
-void Queries(Gpu& gpu, uint32_t W, uint32_t DW)
+// Returns the other providers the DLL offers (AMD's, forwarded), by id and name.
+std::vector<std::pair<uint64_t, std::string>> Queries(Gpu& gpu, uint32_t W, uint32_t DW)
 {
     uint64_t                count = 0;
     ffxQueryDescGetVersions qv{};
@@ -259,22 +319,28 @@ void Queries(Gpu& gpu, uint32_t W, uint32_t DW)
     qv.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     qv.device         = gpu.device;
     qv.outputCount    = &count;
-    CHECK(ffxQuery(nullptr, &qv.header) == FFX_API_RETURN_OK && count >= 1, "version count %llu", (unsigned long long)count);
+    CHECK(g_api.query(nullptr, &qv.header) == FFX_API_RETURN_OK && count >= 1, "version count %llu", (unsigned long long)count);
     uint64_t    ids[4]   = {};
     const char* names[4] = {};
     count                = 4;
     qv.versionIds        = ids;
     qv.versionNames      = names;
-    CHECK(ffxQuery(nullptr, &qv.header) == FFX_API_RETURN_OK && count >= 1 && names[0] && !std::strncmp(names[0], "RDNU", 4),
+    CHECK(g_api.query(nullptr, &qv.header) == FFX_API_RETURN_OK && count >= 1 && names[0] && !std::strncmp(names[0], "RDNU", 4),
           "versions");
-    std::printf("  versions: %s (0x%016llx)\n", names[0] ? names[0] : "?", (unsigned long long)ids[0]);
+    std::vector<std::pair<uint64_t, std::string>> others;
+    for (uint64_t i = 0; i < count; ++i)
+    {
+        std::printf("  version %llu: %s (0x%016llx)\n", (unsigned long long)i, names[i] ? names[i] : "?", (unsigned long long)ids[i]);
+        if (i)
+            others.push_back({ids[i], names[i] ? names[i] : "?"});
+    }
 
     float                                              ratio = 0;
     ffxQueryDescUpscaleGetUpscaleRatioFromQualityMode qr{};
     qr.header.type      = FFX_API_QUERY_DESC_TYPE_UPSCALE_GETUPSCALERATIOFROMQUALITYMODE;
     qr.qualityMode      = FFX_UPSCALE_QUALITY_MODE_PERFORMANCE;
     qr.pOutUpscaleRatio = &ratio;
-    CHECK(ffxQuery(nullptr, &qr.header) == FFX_API_RETURN_OK && ratio == 2.0f, "performance ratio %g", ratio);
+    CHECK(g_api.query(nullptr, &qr.header) == FFX_API_RETURN_OK && ratio == 2.0f, "performance ratio %g", ratio);
 
     uint32_t                                              rw = 0, rh = 0;
     ffxQueryDescUpscaleGetRenderResolutionFromQualityMode qs{};
@@ -284,7 +350,7 @@ void Queries(Gpu& gpu, uint32_t W, uint32_t DW)
     qs.qualityMode      = FFX_UPSCALE_QUALITY_MODE_QUALITY;
     qs.pOutRenderWidth  = &rw;
     qs.pOutRenderHeight = &rh;
-    CHECK(ffxQuery(nullptr, &qs.header) == FFX_API_RETURN_OK && rw == 2560 && rh == 1440, "quality at 4K: %ux%u", rw, rh);
+    CHECK(g_api.query(nullptr, &qs.header) == FFX_API_RETURN_OK && rw == 2560 && rh == 1440, "quality at 4K: %ux%u", rw, rh);
 
     int32_t                                phases = 0;
     ffxQueryDescUpscaleGetJitterPhaseCount qp{};
@@ -292,7 +358,7 @@ void Queries(Gpu& gpu, uint32_t W, uint32_t DW)
     qp.renderWidth    = W;
     qp.displayWidth   = DW;
     qp.pOutPhaseCount = &phases;
-    CHECK(ffxQuery(nullptr, &qp.header) == FFX_API_RETURN_OK && phases > 0, "jitter phases %d", phases);
+    CHECK(g_api.query(nullptr, &qp.header) == FFX_API_RETURN_OK && phases > 0, "jitter phases %d", phases);
 
     bool inside = true;
     for (int32_t i = 0; i < phases; ++i)
@@ -304,22 +370,29 @@ void Queries(Gpu& gpu, uint32_t W, uint32_t DW)
         qj.phaseCount  = phases;
         qj.pOutX       = &x;
         qj.pOutY       = &y;
-        inside = inside && ffxQuery(nullptr, &qj.header) == FFX_API_RETURN_OK && std::fabs(x) <= 0.5f && std::fabs(y) <= 0.5f;
+        inside = inside && g_api.query(nullptr, &qj.header) == FFX_API_RETURN_OK && std::fabs(x) <= 0.5f && std::fabs(y) <= 0.5f;
     }
     CHECK(inside, "jitter offsets within half a pixel");
     std::printf("  ratio %.1f, quality at 4K %ux%u, %d jitter phases\n", ratio, rw, rh, phases);
+    return others;
 }
 }  // namespace
 
 int main(int argc, char** argv)
 {
     if (argc < 2)
-        return std::printf("usage: test_fsr_api <golden dir> [--frames N]\n"), 1;
+        return std::printf("usage: test_fsr_api <golden dir> [--frames N] [--dll file]\n"), 1;
     std::string dir = argv[1], err;
     uint32_t    frames = 8;
     for (int i = 2; i < argc; ++i)
+    {
         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc)
             frames = uint32_t(std::atoi(argv[++i]));
+#ifdef _WIN32
+        else if (!std::strcmp(argv[i], "--dll") && i + 1 < argc && !LoadApi(argv[++i]))
+            return std::printf("cannot load %s\n", argv[i]), 1;
+#endif
+    }
     std::map<std::string, rdnut::Tensor> seq;
     if (!rdnut::Load(dir + "/nss_frames.rdnut", seq, err))
         return std::printf("%s\n", err.c_str()), 1;
@@ -336,7 +409,7 @@ int main(int argc, char** argv)
         return std::printf("no D3D12 device\n"), 1;
 
     std::printf("queries\n");
-    Queries(gpu, f.W, 2 * f.W);
+    const auto others = Queries(gpu, f.W, 2 * f.W);
 
     std::printf("dispatch, tonemapped PSNR per frame (dB)\n");
     const uint32_t half = f.count / 2;
@@ -345,7 +418,11 @@ int main(int argc, char** argv)
     Print("exposure texture", base, 0);
     o.viaLoader = true;
     const Result loader = Run(gpu, f, o);
+#ifdef _WIN32
+    Print("again, in a new context", loader, 0);
+#else
     Print("through the SDK 2 provider", loader, 0);
+#endif
     o = Options();
     o.pre = 4.0f;
     const Result pre = Run(gpu, f, o);
@@ -376,6 +453,14 @@ int main(int argc, char** argv)
     o.first = half;
     const Result fresh = Run(gpu, f, o);
     Print("small size only", fresh, half);
+    for (const auto& v : others)
+    {
+        o         = Options();
+        o.version = v.first;
+        const Result amd = Run(gpu, f, o);
+        Print(("AMD " + v.second + ", forwarded").c_str(), amd, 0);
+        CHECK(amd.ok, "forwarding to %s", v.second.c_str());
+    }
 
     for (const Result* r : {&base, &loader, &pre, &none, &autoExp, &sharp, &jittered, &display, &resize, &fresh})
         CHECK(r->ok && r->psnr.size() == (r == &fresh ? f.count - half : f.count), "run incomplete");

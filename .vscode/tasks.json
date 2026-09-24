@@ -40,12 +40,12 @@
       "problemMatcher": ["$cmake"]
     },
     {
-      "label": "Validate Shaders (DXC)",
-      "detail": "Best-effort HLSL validation. Requires 'dxc' on PATH and a prior CMake configure.",
+      "label": "Check Shaders (DXC)",
+      "detail": "DXC over every shader and the generated NSS headers. Needs a prior CMake configure.",
       "type": "shell",
       "command": "cmake",
-      "windows": { "args": ["--build", "${workspaceFolder}/build/windows", "--config", "Release", "--target", "validate_shaders"] },
-      "linux":   { "args": ["--build", "${workspaceFolder}/build/linux", "--config", "Release", "--target", "validate_shaders"] },
+      "windows": { "args": ["--build", "${workspaceFolder}/build/windows", "--config", "Release", "--target", "check_shaders"] },
+      "linux":   { "args": ["--build", "${workspaceFolder}/build/linux", "--config", "Release", "--target", "check_shaders"] },
       "problemMatcher": []
     }
   ]

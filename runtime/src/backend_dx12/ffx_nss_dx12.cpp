@@ -457,20 +457,16 @@ FfxErrorCode GetDeviceCapabilities(FfxInterface* i, FfxDeviceCapabilities* caps)
 {
     Backend* b = Get(i);
     *caps      = {};
-    D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_6};
-    if (FAILED(b->device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))))
-        sm.HighestShaderModel = D3D_SHADER_MODEL_5_1;
-    switch (sm.HighestShaderModel)
+    // Runtimes reject models newer than they know, so ask from 6.6 down.
+    uint32_t model = 0x51;
+    for (uint32_t v = 0x66; v >= 0x60 && model == 0x51; --v)
     {
-    case D3D_SHADER_MODEL_6_0: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_6_0; break;
-    case D3D_SHADER_MODEL_6_1: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_6_1; break;
-    case D3D_SHADER_MODEL_6_2: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_6_2; break;
-    case D3D_SHADER_MODEL_6_3: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_6_3; break;
-    case D3D_SHADER_MODEL_6_4: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_6_4; break;
-    case D3D_SHADER_MODEL_6_5: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_6_5; break;
-    case D3D_SHADER_MODEL_6_6: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_6_6; break;
-    default: caps->maximumSupportedShaderModel = FFX_SHADER_MODEL_5_1; break;
+        D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL(v)};
+        if (SUCCEEDED(b->device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))))
+            model = sm.HighestShaderModel;
     }
+    caps->maximumSupportedShaderModel = model >= 0x60 && model <= 0x66 ? FfxShaderModel(FFX_SHADER_MODEL_6_0 + (model - 0x60))
+                                                                      : FFX_SHADER_MODEL_5_1;
     D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1{};
     if (SUCCEEDED(b->device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &o1, sizeof(o1))))
         caps->waveLaneCountMin = o1.WaveLaneCountMin, caps->waveLaneCountMax = o1.WaveLaneCountMax;
