@@ -92,8 +92,7 @@ outputs, so a single INT8 HLSL runtime serves both.
 
 Design provenance: the layout (input-res U-Net, oriented-Gaussian kernel in input space,
 explicit blend, small recurrent state) is what Arm's paper, Sony's SIGGRAPH 2026 PSSR 2.0 talk and
-AMD's public FSR4 description all converge on. Design from those public descriptions; do not read
-or reuse the leaked FSR4 source.
+AMD's public FSR4 description all converge on. Decision (2026-09-24): the leaked FSR4 source (https://github.com/lhl/fsr4-rdna3-optimization; clone it locally, it is kept out of the default checkout) is used as a reference for the HLSL runtime: pass structure, INT8 dot4/wave-matrix conventions, pre/post passes, dispatch layout. Its code and weights are not copied into RDNU and it is not a training source; its licence status is contested (MIT file vs "All rights reserved" headers).
 
 ## 4. Training changes (Model Gym, fp32 then QAT)
 

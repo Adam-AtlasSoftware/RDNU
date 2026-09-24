@@ -96,6 +96,9 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/pixelshuffle.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/axpy.hlsl"        "$<TARGET_FILE_DIR:rdnu_engine>"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/conv2d_int8.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/relu.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/sigmoid.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/harness/shaders/upsample_nearest.hlsl" "$<TARGET_FILE_DIR:rdnu_engine>"
         VERBATIM)
     add_custom_target(run_engine
         COMMAND ${CMAKE_COMMAND} -E echo "== CCM/FFN block  (conv3x3 -> GELU -> conv1x1) =="
@@ -124,6 +127,10 @@ if(WIN32)
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/int8_down_s2.rdnut"
         COMMAND ${CMAKE_COMMAND} -E echo "== WHOLE MODEL INT8 (W8A8 process_forward vs torch int8 ref) =="
         COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/full_model_int8.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== NSS backbone   (fp32: 14 convs, relu/sigmoid, nearest-up, concat) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/nss_backbone.rdnut"
+        COMMAND ${CMAKE_COMMAND} -E echo "== NSS backbone INT8 (QAT weights, affine activations, vs integer-path ref) =="
+        COMMAND "$<TARGET_FILE:rdnu_engine>" "${RDNU_GOLDEN}/nss_backbone_int8.rdnut"
         DEPENDS rdnu_engine
         USES_TERMINAL
         COMMENT "Running the RDNU block engine on all composite blocks vs golden")

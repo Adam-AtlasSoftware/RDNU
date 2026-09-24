@@ -236,6 +236,50 @@ std::vector<Op> programFullInt8()
     gInt8 = false;
     return ops;
 }
+
+// Arm NSS v1 backbone (AutoEncoderV1, ml/model-gym): 14 ConvBlocks (3x3 conv + ReLU or sigmoid),
+// nearest 2x upsamples and two skip concats. Heads: kpn_params (36 ch at 1/4 linear res, sigmoid)
+// and temporal_params (4 ch at input res, sigmoid). Bundles come from runtime/tools/nss_export.py;
+// weights are keyed <layer>.weight/.bias (fp32) or <layer>.weight.{w,scale,bias,ascale} (INT8).
+void appendConvBlock(std::vector<Op>& ops, const std::string& layer, const std::string& in,
+                     const std::string& out, uint32_t stride, const char* act)
+{
+    ops.push_back(conv(in, out + "_pre", layer + ".weight", layer + ".bias", 3, 3, 1, 1, stride, stride, 1));
+    ops.push_back(Op{ act, { out + "_pre" }, { out } });
+}
+
+std::vector<Op> programNSS()
+{
+    std::vector<Op> ops;
+    appendConvBlock(ops, "conv2d_0", "input",    "conv2d_0", 2, "relu");
+    appendConvBlock(ops, "conv2d_1", "conv2d_0", "conv2d_1", 1, "relu");           // skip1
+    appendConvBlock(ops, "conv2d_2", "conv2d_1", "conv2d_2", 2, "relu");
+    appendConvBlock(ops, "conv2d_3", "conv2d_2", "conv2d_3", 1, "relu");           // skip2
+    appendConvBlock(ops, "conv2d_4", "conv2d_3", "conv2d_4", 2, "relu");
+    appendConvBlock(ops, "conv2d_5", "conv2d_4", "conv2d_5", 1, "relu");
+    appendConvBlock(ops, "conv2d_6", "conv2d_5", "conv2d_6", 1, "relu");
+    ops.push_back(Op{ "upnearest", { "conv2d_6" }, { "u6" } });
+    appendConvBlock(ops, "conv2d_7", "u6", "conv2d_7", 1, "relu");
+    ops.push_back(Op{ "concat", { "conv2d_7", "conv2d_3" }, { "cat7" } });
+    appendConvBlock(ops, "conv2d_8", "cat7", "conv2d_8", 1, "relu");
+    appendConvBlock(ops, "kpn_params", "conv2d_8", "kpn", 1, "sigmoid");
+    ops.push_back(Op{ "upnearest", { "conv2d_8" }, { "u8" } });
+    appendConvBlock(ops, "conv2d_9", "u8", "conv2d_9", 1, "relu");
+    ops.push_back(Op{ "concat", { "conv2d_9", "conv2d_1" }, { "cat9" } });
+    appendConvBlock(ops, "conv2d_10", "cat9", "conv2d_10", 1, "relu");
+    appendConvBlock(ops, "conv2d_11", "conv2d_10", "conv2d_11", 1, "relu");
+    ops.push_back(Op{ "upnearest", { "conv2d_11" }, { "u11" } });
+    appendConvBlock(ops, "temporal_params_out_conv", "u11", "output", 1, "sigmoid");
+    return ops;
+}
+
+std::vector<Op> programNSSInt8()
+{
+    gInt8 = true;
+    std::vector<Op> ops = programNSS();
+    gInt8 = false;
+    return ops;
+}
 }
 
 int main(int argc, char** argv)
@@ -260,6 +304,8 @@ int main(int argc, char** argv)
     // Pick the block program from which weights the bundle carries.
     std::vector<Op> ops; const char* blockName;
     if (bundle.count("i8p")) { ops = programConvInt8(bundle.at("i8p").data); blockName = "ConvInt8"; }
+    else if (bundle.count("conv2d_0.weight.w")) { ops = programNSSInt8(); blockName = "NSS-I8"; }
+    else if (bundle.count("conv2d_0.weight")) { ops = programNSS(); blockName = "NSS"; }
     else if (bundle.count("first_conv.weight.w")) { ops = programFullInt8(); blockName = "WholeModelI8"; }
     else if (bundle.count("first_conv.weight")) { ops = programFull(); blockName = "WholeModel"; }
     else if (bundle.count("hfb.conv_g.weight")) { ops = programDecodeLayer(); blockName = "DecodeLayer"; }
@@ -330,6 +376,9 @@ int main(int argc, char** argv)
     ComPtr<ID3D12PipelineState> psoPShuf   = makePSO(L"pixelshuffle.hlsl",   L"pixelshuffle_CS");
     ComPtr<ID3D12PipelineState> psoAxpy    = makePSO(L"axpy.hlsl",           L"axpy_CS");
     ComPtr<ID3D12PipelineState> psoConvI8  = makePSO(L"conv2d_int8.hlsl",    L"conv2d_int8_CS");
+    ComPtr<ID3D12PipelineState> psoRelu    = makePSO(L"relu.hlsl",           L"relu_CS");
+    ComPtr<ID3D12PipelineState> psoSigmoid = makePSO(L"sigmoid.hlsl",        L"sigmoid_CS");
+    ComPtr<ID3D12PipelineState> psoUpNear  = makePSO(L"upsample_nearest.hlsl", L"upsample_nearest_CS");
 
     // ---- resource bookkeeping ----
     std::vector<ComPtr<ID3D12Resource>> alive;                    // keep every buffer alive
@@ -420,8 +469,17 @@ int main(int argc, char** argv)
         }
         else if (op.kind == "conv2d_int8")   // W8A8 conv; weights keyed off op.weight (+.w/.scale/.bias/.ascale)
         {
-            uploadWB(op.weight + ".w"); uploadWB(op.weight + ".scale");
-            uploadWB(op.weight + ".bias"); uploadWB(op.weight + ".ascale");
+            uploadWB(op.weight + ".w"); uploadWB(op.weight + ".scale"); uploadWB(op.weight + ".bias");
+            {   // ascale is [scale, zero_point, qmin, qmax]; older bundles carry [scale] only (symmetric)
+                const std::string k = op.weight + ".ascale";
+                const Tensor& t = bundle.at(k);
+                if (t.count() < 4 && !wbuf.count(k))
+                {
+                    float q[4] = { t.data[0], 0.0f, -127.0f, 127.0f };
+                    wbuf[k] = UploadBuffer(dev.Get(), q, sizeof(q));
+                }
+                else uploadWB(k);
+            }
             uint32_t groups = (op.Groups == 0) ? a.shape.c : op.Groups;
             out.c = bundle.at(op.weight + ".w").dims[0];
             out.h = (a.shape.h + 2 * op.PadH - op.KH) / op.StrideH + 1;
@@ -432,12 +490,14 @@ int main(int argc, char** argv)
             cst[8] = op.StrideH; cst[9] = op.StrideW; cst[10] = groups; cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
-        else if (op.kind == "gelu" || op.kind == "mul" || op.kind == "add" || op.kind == "concat" || op.kind == "axpy")
+        else if (op.kind == "gelu" || op.kind == "relu" || op.kind == "sigmoid"
+              || op.kind == "mul" || op.kind == "add" || op.kind == "concat" || op.kind == "axpy")
         {
-            twoInput = (op.kind != "gelu");
+            twoInput = (op.ins.size() > 1);
             if (op.kind == "concat") { Value b = vals.at(op.ins[1]); out = { a.shape.c + b.shape.c, a.shape.h, a.shape.w }; }
             else out = a.shape;
-            pso = op.kind == "gelu" ? psoGelu.Get() : op.kind == "mul" ? psoMul.Get()
+            pso = op.kind == "gelu" ? psoGelu.Get() : op.kind == "relu" ? psoRelu.Get()
+                : op.kind == "sigmoid" ? psoSigmoid.Get() : op.kind == "mul" ? psoMul.Get()
                 : op.kind == "add" ? psoAdd.Get() : op.kind == "axpy" ? psoAxpy.Get() : psoConcat.Get();
             if (op.kind == "axpy") uploadWB(op.weight);   // per-channel alpha on t2
             cst[0] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[3] = out.c;
@@ -450,6 +510,12 @@ int main(int argc, char** argv)
             if (op.ins.size() >= 2) { Value r = vals.at(op.ins[1]); out = { a.shape.c, r.shape.h, r.shape.w }; }
             else { uint32_t s = op.StrideH; out = { a.shape.c, a.shape.h * s, a.shape.w * s }; }
             pso = psoResize.Get();
+            cst[3] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[11] = out.h; cst[12] = out.w;
+            gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
+        }
+        else if (op.kind == "upnearest")   // nearest 2x; slots: Cout=C, H, W, OH, OW
+        {
+            out = { a.shape.c, a.shape.h * 2, a.shape.w * 2 }; pso = psoUpNear.Get();
             cst[3] = a.shape.c; cst[1] = a.shape.h; cst[2] = a.shape.w; cst[11] = out.h; cst[12] = out.w;
             gx = (out.w + 7) / 8; gy = (out.h + 7) / 8; gz = out.c;
         }
