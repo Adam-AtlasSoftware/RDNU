@@ -66,12 +66,15 @@ public:
     void   Download(const Image& img, void* texels);
     VkSampler LinearClampSampler();
     VkSampler PointClampSampler();
+    bool      StorageFormat(VkFormat format) const;
 
     // Compiles HLSL (cached by name) and builds a pipeline for the given binding layout.
     bool CreatePipeline(const std::string& hlslPath, const std::string& entry, const std::string& profile,
                         const std::vector<std::string>& defines, const std::vector<std::string>& includeDirs,
                         const std::string& cacheName, const std::vector<std::pair<uint32_t, VkDescriptorType>>& layout,
                         Pipeline& out, std::string& error);
+    bool CreatePipeline(const std::vector<uint32_t>& spirv, const std::string& entry, const std::string& name,
+                        const std::vector<std::pair<uint32_t, VkDescriptorType>>& layout, Pipeline& out, std::string& error);
     void Destroy(Pipeline& p);
 
     // Binds resources (binding index -> resource), dispatches, waits.
@@ -103,5 +106,9 @@ std::string DxcPath();
 bool CompileHlsl(const std::string& hlslPath, const std::string& entry, const std::string& profile,
                  const std::vector<std::string>& defines, const std::vector<std::string>& includeDirs,
                  const std::string& cacheName, std::vector<uint32_t>& spirv, std::string& error);
+// GLSL compute shaders through glslangValidator ($GLSLANG or on PATH), same cache.
+bool CompileGlsl(const std::string& glslPath, const std::vector<std::string>& defines,
+                 const std::vector<std::string>& includeDirs, const std::string& cacheName,
+                 std::vector<uint32_t>& spirv, std::string& error);
 
 }  // namespace vkc

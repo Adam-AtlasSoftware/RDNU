@@ -35,6 +35,33 @@ bool ReadFile(const std::string& path, std::vector<char>& out)
 std::string Quote(const std::string& s) { return "'" + s + "'"; }
 }  // namespace
 
+static void CachePaths(const std::string& name, std::string& out, std::string& log)
+{
+    const char* c   = std::getenv("RDNU_SPV_CACHE");
+    std::string dir = c && *c ? c : "/tmp/rdnu_spv";
+    mkdir(dir.c_str(), 0755);
+    out = dir + "/" + name + ".spv";
+    log = dir + "/" + name + ".log";
+}
+
+static bool RunCompiler(const std::string& cmd, const std::string& out, const std::string& log, const char* tool,
+                 const std::string& name, std::vector<uint32_t>& spirv, std::string& error)
+{
+    if (std::system((cmd + " > " + Quote(log) + " 2>&1").c_str()) != 0)
+    {
+        std::vector<char> l;
+        ReadFile(log, l);
+        error = std::string(tool) + " failed for " + name + ":\n" + std::string(l.begin(), l.end());
+        return false;
+    }
+    std::vector<char> bytes;
+    if (!ReadFile(out, bytes) || bytes.size() % 4)
+        return error = "cannot read " + out, false;
+    spirv.resize(bytes.size() / 4);
+    std::memcpy(spirv.data(), bytes.data(), bytes.size());
+    return true;
+}
+
 std::string DxcPath()
 {
     const char* e = std::getenv("DXC");
@@ -45,11 +72,8 @@ bool CompileHlsl(const std::string& hlslPath, const std::string& entry, const st
                  const std::vector<std::string>& defines, const std::vector<std::string>& includeDirs,
                  const std::string& cacheName, std::vector<uint32_t>& spirv, std::string& error)
 {
-    const char* c   = std::getenv("RDNU_SPV_CACHE");
-    std::string dir = c && *c ? c : "/tmp/rdnu_spv";
-    mkdir(dir.c_str(), 0755);
-    std::string out = dir + "/" + cacheName + ".spv";
-    std::string log = dir + "/" + cacheName + ".log";
+    std::string out, log;
+    CachePaths(cacheName, out, log);
 
     std::ostringstream cmd;
     cmd << Quote(DxcPath()) << " -spirv -fspv-target-env=vulkan1.3 -fvk-use-dx-layout -HV 2021 -enable-16bit-types"
@@ -60,20 +84,25 @@ bool CompileHlsl(const std::string& hlslPath, const std::string& entry, const st
         cmd << " -D " << Quote(d);
     for (const std::string& i : includeDirs)
         cmd << " -I " << Quote(i);
-    cmd << " " << Quote(hlslPath) << " -Fo " << Quote(out) << " > " << Quote(log) << " 2>&1";
-    if (std::system(cmd.str().c_str()) != 0)
-    {
-        std::vector<char> l;
-        ReadFile(log, l);
-        error = "dxc failed for " + cacheName + ":\n" + std::string(l.begin(), l.end());
-        return false;
-    }
-    std::vector<char> bytes;
-    if (!ReadFile(out, bytes) || bytes.size() % 4)
-        return error = "cannot read " + out, false;
-    spirv.resize(bytes.size() / 4);
-    std::memcpy(spirv.data(), bytes.data(), bytes.size());
-    return true;
+    cmd << " " << Quote(hlslPath) << " -Fo " << Quote(out);
+    return RunCompiler(cmd.str(), out, log, "dxc", cacheName, spirv, error);
+}
+
+bool CompileGlsl(const std::string& glslPath, const std::vector<std::string>& defines,
+                 const std::vector<std::string>& includeDirs, const std::string& cacheName,
+                 std::vector<uint32_t>& spirv, std::string& error)
+{
+    const char* g = std::getenv("GLSLANG");
+    std::string out, log;
+    CachePaths(cacheName, out, log);
+    std::ostringstream cmd;
+    cmd << Quote(g && *g ? g : "glslangValidator") << " -V --target-env vulkan1.3 -S comp -e main";
+    for (const std::string& d : defines)
+        cmd << " -D" << Quote(d);
+    for (const std::string& i : includeDirs)
+        cmd << " -I" << Quote(i);
+    cmd << " " << Quote(glslPath) << " -o " << Quote(out);
+    return RunCompiler(cmd.str(), out, log, "glslang", cacheName, spirv, error);
 }
 
 bool Context::Init(std::string& error)
@@ -187,6 +216,13 @@ Context::~Context()
 }
 
 VkSampler Context::LinearClampSampler() { return linear_; }
+
+bool Context::StorageFormat(VkFormat format) const
+{
+    VkFormatProperties p;
+    vkGetPhysicalDeviceFormatProperties(phys_, format, &p);
+    return p.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+}
 VkSampler Context::PointClampSampler() { return point_; }
 
 uint32_t Context::MemoryType(uint32_t bits, VkMemoryPropertyFlags flags) const
@@ -345,6 +381,12 @@ bool Context::CreatePipeline(const std::string& hlslPath, const std::string& ent
     std::vector<uint32_t> spirv;
     if (!CompileHlsl(hlslPath, entry, profile, defines, includeDirs, cacheName, spirv, error))
         return false;
+    return CreatePipeline(spirv, entry, cacheName, layout, out, error);
+}
+
+bool Context::CreatePipeline(const std::vector<uint32_t>& spirv, const std::string& entry, const std::string& cacheName,
+                             const std::vector<std::pair<uint32_t, VkDescriptorType>>& layout, Pipeline& out, std::string& error)
+{
     VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smci.codeSize = spirv.size() * 4;
     smci.pCode    = spirv.data();
