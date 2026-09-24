@@ -8,6 +8,7 @@
 // (history restarts) and the old one is destroyed once the GPU is done with it. Pipelines and
 // the network engine are shared, so a new context only allocates its own textures.
 //
+// RDNU_LOG=<file> appends every message there; games rarely pass a message callback.
 // RDNU_FORCE_DP4A=1 runs the DP4a network kernels on RDNA3 too (A/B timing).
 // RDNU_CAPTURE=<dir> dumps every dispatch (rdnu_capture.h). With RDNU_COMPARE=<version> as well,
 // AMD's upscaler of that version (a substring of its name, or any) runs on the same inputs into
@@ -23,6 +24,7 @@
 #include <ffx_upscale.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -49,6 +51,15 @@ ffxApiMessage   g_message = nullptr;
 
 void Say(uint32_t type, const std::string& s)
 {
+    static FILE* log = [] {
+        const char* path = std::getenv("RDNU_LOG");
+        return path && *path ? std::fopen(path, "a") : nullptr;
+    }();
+    if (log)
+    {
+        std::fprintf(log, "%s: %s\n", type == FFX_API_MESSAGE_TYPE_ERROR ? "error" : "warning", s.c_str());
+        std::fflush(log);
+    }
     if (!g_message)
         return;
     std::wstring w(s.begin(), s.end());
@@ -585,6 +596,12 @@ ffxReturnCode_t CreateUpscaler(ffxContext* context, ffxCreateContextDescHeader* 
             ::operator delete(memory);
         return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
     }
+    FfxDeviceCapabilities caps{};
+    u->iface.fpGetDeviceCapabilities(&u->iface, &caps);
+    Say(FFX_API_MESSAGE_TYPE_WARNING, "context " + std::to_string(u->maxRender.width) + "x" + std::to_string(u->maxRender.height) + " -> " +
+                                          std::to_string(u->maxUpscale.width) + "x" + std::to_string(u->maxUpscale.height) + ", flags " +
+                                          std::to_string(u->flags) + ", shader model 6." + std::to_string(int(caps.maximumSupportedShaderModel) - 1) +
+                                          (caps.fp16Supported ? "" : ", no fp16") + (ffxNssDx12UsesWmma(&u->iface) ? ", WMMA" : ", DP4a"));
     std::lock_guard<std::mutex> l(g_lock);
     g_ours.insert(u);
     *context = u;

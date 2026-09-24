@@ -73,7 +73,7 @@ QUANT_IDX = {
     "conv2d_9": (34, 35), "conv2d_10": (38, 39), "conv2d_11": (41, 42),
     "temporal_params_out_conv": (45, 46),
 }
-INPUT_SCALE = 0.003912401385605335   # model card: _PreprocessTensor
+INPUT_SCALE = 0.003912401385605335   # model card: _PreprocessTensor (released high model)
 OUTPUT_SCALE = 0.003937007859349251  # model card: _KpnCoefficients / _TemporalTensor
 
 # Production graph (NHWC int8). Concats are channel ranges of one tensor, nearest upsample is a
@@ -497,7 +497,10 @@ def main():
         assert a_z == -128, (n, a_z)
         wq = quantise_weights(w.astype(np.float64), ws)
         layers[n] = {"wq_oihw": wq.astype(np.float32), "wscale": ws, "ascale": a_s, "azp": a_z, "bias": b.astype(np.float64)}
-    assert abs(layers["conv2d_0"]["ascale"] - INPUT_SCALE) < 1e-9
+    # the input scale is learned during QAT and travels in the manifest (rdnu_shaderc passes it
+    # to the pre-process shader); the output scale is fixed by the sigmoid quantiser
+    if abs(layers["conv2d_0"]["ascale"] - INPUT_SCALE) > 1e-9:
+        print(f"input scale {layers['conv2d_0']['ascale']:.17g} differs from the released model's")
     assert abs(float(q["activation_post_process_33.scale"].item()) - OUTPUT_SCALE) < 1e-9
 
     ref = int8_reference(x[0].numpy(), layers)

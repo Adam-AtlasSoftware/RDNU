@@ -1436,6 +1436,11 @@ void ffxNssDx12ForceDp4a(bool force)
     g_forceDp4a = force;
 }
 
+bool ffxNssDx12UsesWmma(FfxInterface* i)
+{
+    return Get(i)->wmma;
+}
+
 FfxErrorCode ffxNssDx12PrepareExposure(FfxInterface* i, ID3D12GraphicsCommandList* cl, const FfxNssDx12Exposure& e)
 {
     Backend* b = Get(i);

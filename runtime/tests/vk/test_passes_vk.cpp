@@ -574,6 +574,13 @@ int main(int argc, char** argv)
     Frame fr{vk};
     fr.cb          = vk.CreateBuffer(256);
     fr.permutation = {"NSS_SHADER_QUALITY_MODE=0", std::string("SCALE_PRESET_MODE=") + (x2 ? "1" : "0"), "REVERSE_Z=0", "MANAGE_HISTORY=1"};
+    for (const rdnu::TensorRecord& t : manifest.tensors)
+        if (rdnu::TensorKind(t.kind) == rdnu::TensorKind::Input)
+        {
+            char inputScale[64];
+            std::snprintf(inputScale, sizeof(inputScale), "RDNU_INPUT_SCALE=%.17g", double(t.scale));
+            fr.permutation.push_back(inputScale);
+        }
 
     auto zero = [&](Tex& t) { vk.Upload(t.img, std::vector<uint8_t>(size_t(t.img.width) * t.img.height * t.img.texelBytes).data()); };
     for (Tex* t : {&tLuma[0], &tLuma[1], &tNearest, &tDisocc, &tFeedback, &tHistory[0], &tHistory[1], &tLut, &tOutput, &tDebug})

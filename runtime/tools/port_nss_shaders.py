@@ -41,6 +41,16 @@ TARGETED = {
         (r"#if FFX_HALF\n// --- RCP functions for float16 types ---.*?(?=#define MAX_FP16)", ""),
     ],
     "ffx_nss_preprocess.h": [
+        # the input quantiser scale is learned per model: rdnu_shaderc passes the manifest's
+        (r"// High model\n"
+         r"const half2 kPreprocessQuant   = half2\(1\.0 / 0\.003912401385605335, -128\.0\);\n"
+         r"const half2 kPreprocessDequant = half2\(0\.003912401385605335, -128\.0\);\n",
+         "// High model; RDNU_INPUT_SCALE from the model manifest (rdnu_shaderc), else the released one\n"
+         "#ifndef RDNU_INPUT_SCALE\n"
+         "#define RDNU_INPUT_SCALE 0.003912401385605335\n"
+         "#endif\n"
+         "const half2 kPreprocessQuant   = half2(1.0 / RDNU_INPUT_SCALE, -128.0);\n"
+         "const half2 kPreprocessDequant = half2(RDNU_INPUT_SCALE, -128.0);\n"),
         (r"    rw_preprocessed_tensor_buffer\.data\[base \+ 0u\] = t_vec0;\n"
          r"    rw_preprocessed_tensor_buffer\.data\[base \+ 1u\] = t_vec1;\n"
          r"    rw_preprocessed_tensor_buffer\.data\[base \+ 2u\] = t_vec2;\n",

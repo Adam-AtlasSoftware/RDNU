@@ -90,6 +90,7 @@ Environment variables for testing:
 
 | Variable | Effect |
 |---|---|
+| `RDNU_LOG=<file>` | appends RDNU's messages to a file; games rarely show the API's message callback |
 | `RDNU_FORCE_DP4A=1` | the RDNA2 kernels on RDNA3, for A/B timing |
 | `RDNU_CAPTURE=<dir>` | dumps every dispatch for `runtime/tools/eval/compare.py` |
 | `RDNU_CAPTURE_FRAMES=N` | frames per context to capture (300) |
@@ -98,8 +99,8 @@ Environment variables for testing:
 ## Troubleshooting
 
 - **RDNU is not listed or the game falls back to FSR:** the device lacks SM 6.4 or native 16-bit
-  types, or context creation failed. Hook the FidelityFX API's debug message callback; RDNU's
-  messages start with `RDNU:`.
+  types, or context creation failed. Set `RDNU_LOG` and read the file; each context logs its sizes
+  and flags, and errors say what failed.
 - **`dxc` not found:** pass `-DRDNU_DXC=<path to dxc.exe>`.
 - **Sample build fails on `rdg_dx12_backend.cpp`:** the patch above is not applied.
 - **Sample: cannot open `directx/d3d12.h` or `pix3.h`:** re-run `vcpkg integrate install`; the

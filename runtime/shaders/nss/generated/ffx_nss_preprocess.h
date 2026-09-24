@@ -109,9 +109,12 @@ static const float kMotionThresholdSq = kMotionThreshold * kMotionThreshold;
 static const half2 kPreprocessQuant   = half2(1.0 / 0.003919049631804228, -128.0);
 static const half2 kPreprocessDequant = half2(0.003919049631804228, -128.0);
 #else
-// High model
-static const half2 kPreprocessQuant   = half2(1.0 / 0.003912401385605335, -128.0);
-static const half2 kPreprocessDequant = half2(0.003912401385605335, -128.0);
+// High model; RDNU_INPUT_SCALE from the model manifest (rdnu_shaderc), else the released one
+#ifndef RDNU_INPUT_SCALE
+#define RDNU_INPUT_SCALE 0.003912401385605335
+#endif
+static const half2 kPreprocessQuant   = half2(1.0 / RDNU_INPUT_SCALE, -128.0);
+static const half2 kPreprocessDequant = half2(RDNU_INPUT_SCALE, -128.0);
 #endif
 
 // Temporal feedback stored as SNORM alias: convert sampled [-1,1] back to model [0,1] domain.

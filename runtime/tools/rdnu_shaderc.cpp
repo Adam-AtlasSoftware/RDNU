@@ -165,14 +165,21 @@ int main(int argc, char** argv)
             j.profile = "cs_6_6", j.includes.push_back(amdExt);
         jobs.push_back(j);
     }
+    // the pre-process pass quantises the network input with the model's learned scale
+    char inputScale[64] = "";
+    for (const rdnu::TensorRecord& t : manifest.tensors)
+        if (rdnu::TensorKind(t.kind) == rdnu::TensorKind::Input)
+            std::snprintf(inputScale, sizeof(inputScale), "RDNU_INPUT_SCALE=%.17g", double(t.scale));
     for (const rdnu::PassShader& p : rdnu::PassShaders())
         for (uint32_t q : rdnu::PassQualities())
             for (uint32_t bits = 0; bits < 8; ++bits)
             {
                 if (bits & ~p.bits)
                     continue;
-                jobs.push_back({rdnu::PassShaderName(p, q, bits), nss + "/ffx_nss_" + p.name + ".hlsl", "cs_6_2",
-                                rdnu::PassShaderDefines(p, q, bits), {nss}, {"-Wno-ambig-lit-shift"}});
+                std::vector<std::string> defines = rdnu::PassShaderDefines(p, q, bits);
+                defines.push_back(inputScale);
+                jobs.push_back({rdnu::PassShaderName(p, q, bits), nss + "/ffx_nss_" + p.name + ".hlsl", "cs_6_2", defines, {nss},
+                                {"-Wno-ambig-lit-shift"}});
             }
 
     const std::string tmp = out + ".d";

@@ -20,6 +20,8 @@ FfxResource    ffxGetResourceDX12(ID3D12Resource* resource, FfxResourceStates st
 
 // Runs the network with the plain DP4a kernels even on RDNA3 (A/B testing).
 void ffxNssDx12ForceDp4a(bool force);
+// Whether the network runs on the AMD wave-matrix kernels; known once a context exists.
+bool ffxNssDx12UsesWmma(FfxInterface* backendInterface);
 
 // RDNU extensions for FSR 3.1 hosts, recorded around ffxNssContextDispatch on the same list.
 struct FfxNssDx12Exposure
