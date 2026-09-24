@@ -1,16 +1,19 @@
 // ffx_rcas_pass.hlsl - optional sharpening of the upscaled output.
 // Robust contrast-adaptive sharpening from AMD FidelityFX FSR 1 (FsrRcasF, MIT), with the
-// denoise term on, applied to exposure-scaled colour as the FSR 3 upscaler does. Edge taps
-// clamp to the image instead of reading zeros.
+// denoise term on, applied to exposure-scaled colour as the FSR 3 upscaler does (exposure from
+// rdnu_exposure.hlsl). Edge taps clamp to the image instead of reading zeros.
 cbuffer RcasConstants : register(b0)
 {
     uint2 Size;
-    float Exposure;
     float Sharpness;  // exp2(-stops): 1 is the strongest
+    float Pad;
 };
 
-Texture2D<float4>   Input  : register(t0);
-RWTexture2D<float4> Output : register(u0);
+Texture2D<float4>   Input       : register(t0);
+Texture2D<float>    ExposureTex : register(t1);
+RWTexture2D<float4> Output      : register(u0);
+
+static float Exposure;
 
 #define RCAS_LIMIT (0.25 - 1.0 / 16.0)
 
@@ -30,6 +33,7 @@ void main(uint3 id : SV_DispatchThreadID)
     const int2 p = int2(id.xy);
     if (any(id.xy >= Size))
         return;
+    Exposure = ExposureTex.Load(int3(0, 0, 0));
 
     const float3 b = Tap(p + int2(0, -1));
     const float3 d = Tap(p + int2(-1, 0));

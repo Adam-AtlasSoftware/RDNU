@@ -80,6 +80,7 @@ bool EngineDx12::Create(const EngineDx12Desc& desc, std::string& error)
     cfg.maxHeight  = desc.maxHeight;
     cfg.inputPitch = desc.inputPitch;
     cfg.kpnPitch   = desc.kpnPitch;
+    cfg.packed     = desc.packed;
     cfg.useWmma    = wmma_;
     if (!plan_.Build(manifest_, cfg, error))
         return false;

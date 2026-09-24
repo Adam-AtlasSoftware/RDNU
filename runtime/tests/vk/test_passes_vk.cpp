@@ -560,13 +560,13 @@ int main(int argc, char** argv)
     const Fmt debugFmt = vk.StorageFormat(VkFmt(Fmt::R11G11B10F)) ? Fmt::R11G11B10F : Fmt::RGBA16F;
     Tex tDebug = make(DW, DH, debugFmt), sDebug = make(DW, DH, debugFmt);
     Tex tFeedback{net.temporal, Fmt::RGBA8S};
-    Tex tSharp = make(DW, DH, Fmt::RGBA16F);
+    Tex tSharp = make(DW, DH, Fmt::RGBA16F), tExposure = make(1, 1, Fmt::R32F);
     vkc::Buffer   rcasCb = vk.CreateBuffer(256);
     vkc::Pipeline rcas;
     if (sharpen >= 0 &&
         !vk.CreatePipeline(kHlsl + "/ffx_rcas_pass.hlsl", "main", "cs_6_2", {}, {}, "rdnu_rcas",
                            {{vkc::kShiftB, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}, {vkc::kShiftT, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
-                            {vkc::kShiftU, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}},
+                            {vkc::kShiftT + 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE}, {vkc::kShiftU, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}},
                            rcas, err))
         return std::printf("%s\n", err.c_str()), 1;
     vkc::Buffer sTensor = vk.CreateBuffer(plan.InputBytes());
@@ -663,12 +663,14 @@ int main(int argc, char** argv)
 
         if (sharpen >= 0)
         {
-            struct { uint32_t w, h; float exposure, sharpness; } rc = {DW, DH, e, std::exp2(-sharpen)};
+            struct { uint32_t w, h; float sharpness, pad; } rc = {DW, DH, std::exp2(-sharpen), 0};
             std::memcpy(rcasCb.mapped, &rc, sizeof(rc));
-            vkc::Resource cbr{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &rcasCb, 0, 256}, in, outr;
-            in.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, in.image = &tOutput.img;
+            vk.Upload(tExposure.img, &e);
+            vkc::Resource cbr{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &rcasCb, 0, 256}, in, ex, outr;
+            in.type = ex.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, in.image = &tOutput.img, ex.image = &tExposure.img;
             outr.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, outr.image = &tSharp.img;
-            if (!vk.Dispatch(rcas, {{vkc::kShiftB, cbr}, {vkc::kShiftT, in}, {vkc::kShiftU, outr}}, groups(DW, 8), groups(DH, 8), 1, err))
+            if (!vk.Dispatch(rcas, {{vkc::kShiftB, cbr}, {vkc::kShiftT, in}, {vkc::kShiftT + 1, ex}, {vkc::kShiftU, outr}}, groups(DW, 8),
+                             groups(DH, 8), 1, err))
                 return std::printf("%s\n", err.c_str()), 1;
         }
         std::vector<uint8_t> o = fr.Read({sharpen >= 0 ? &tSharp : &tOutput});
@@ -718,7 +720,7 @@ int main(int argc, char** argv)
         vk.Destroy(t->img);
     if (sharpen >= 0)
         vk.Destroy(rcas);
-    vk.Destroy(tSharp.img);
+    vk.Destroy(tSharp.img), vk.Destroy(tExposure.img);
     vk.Destroy(sTensor), vk.Destroy(fr.cb), vk.Destroy(rcasCb);
     net.Release();
     std::printf("%s\n", fr.ok ? "PASS" : "FAIL");

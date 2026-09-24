@@ -26,6 +26,7 @@ struct EngineDx12Desc
     uint32_t      maxHeight     = 0;
     uint32_t      inputPitch    = 0;        // pixels per row of the input buffer (0: maxWidth)
     uint32_t      kpnPitch      = 0;        // pixels per row of the KPN buffer (0: maxWidth / 4)
+    bool          packed        = false;    // input and KPN rows follow each frame's width
     bool          useWmma       = false;    // RDNA3 with AMD wave-matrix intrinsics enabled
 };
 

@@ -219,6 +219,8 @@ bool Plan::Update(uint32_t width, uint32_t height, std::string& error)
     {
         t.w = width >> t.level;
         t.h = height >> t.level;
+        if (config_.packed && (t.kind == TensorKind::Input || t.kind == TensorKind::Kpn))
+            t.pitchPixels = t.w;
     }
 
     // Byte address of valid pixel (0,0), channel `c`, of a tensor.

@@ -16,7 +16,12 @@
 #include <FidelityFX/host/ffx_nss.h>
 #include <ffx_nss_private.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -27,8 +32,10 @@ constexpr uint32_t kGpuDescriptors = 16384;
 constexpr uint32_t kCpuDescriptors = 256;
 constexpr uint64_t kUploadBytes    = 4u << 20;
 constexpr uint32_t kStagingBytes   = 256u << 10;
+constexpr uint64_t kCbRingBytes    = 64u << 10;
 constexpr D3D12_RESOURCE_STATES kSrvState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 constexpr D3D12_RESOURCE_STATES kUavState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+constexpr uint32_t              kAuxConstants = 12;  // root constants of the exposure, motion and RCAS passes
 
 bool g_forceDp4a = false;
 
@@ -44,14 +51,23 @@ struct Resource
     std::string            name;
 };
 
+// Compute passes: root signature and PSO from the backend's cache, shared by every context.
+// Data graph: the backend's network engine, shared too; contexts only differ in size.
 struct Pipeline
 {
-    ID3D12RootSignature* rootSig    = nullptr;
-    ID3D12PipelineState* pso        = nullptr;
-    UINT                 srvParam   = UINT(-1), uavParam = UINT(-1);
-    uint32_t             srvSlots   = 0, uavSlots = 0;
-    rdnu::EngineDx12*    engine     = nullptr;  // data graph
-    uint32_t             width      = 0, height = 0;
+    uint32_t                          context  = 0;
+    ID3D12RootSignature*              rootSig  = nullptr;
+    ID3D12PipelineState*              pso      = nullptr;
+    UINT                              srvParam = UINT(-1), uavParam = UINT(-1);
+    uint32_t                          srvSlots = 0, uavSlots = 0;
+    std::shared_ptr<rdnu::EngineDx12> engine;
+    uint32_t                          width = 0, height = 0;
+};
+
+struct CachedPipeline
+{
+    std::string key;  // shader and static samplers
+    Pipeline    state;
 };
 
 struct Backend
@@ -62,6 +78,10 @@ struct Backend
     std::vector<bool>     contexts;
     std::vector<Resource> resources;
     std::vector<FfxGpuJobDescription> jobs;
+    std::vector<Pipeline*> graphs;  // data graph pipelines, for memory queries
+    std::vector<CachedPipeline> pipelines;
+    std::shared_ptr<rdnu::EngineDx12> engine;  // grows to the largest data graph asked for
+    uint32_t              engineW = 0, engineH = 0;
     std::vector<D3D12_RESOURCE_BARRIER> barriers;
 
     ID3D12DescriptorHeap* gpuHeap = nullptr;
@@ -74,6 +94,21 @@ struct Backend
     std::vector<uint8_t>  staging;
     uint32_t              stagingHead = 0;
     bool                  wmma = false;
+
+    // exposure and sharpening (rdnu_exposure.hlsl, ffx_rcas_pass.hlsl)
+    ID3D12RootSignature*  auxRootSig = nullptr;
+    ID3D12PipelineState*  auxPrepare = nullptr;
+    ID3D12PipelineState*  auxPatch   = nullptr;
+    ID3D12PipelineState*  auxRcas    = nullptr;
+    ID3D12PipelineState*  auxMotion  = nullptr;
+    ID3D12Resource*       exposure   = nullptr;  // R32_FLOAT 1x1
+    D3D12_RESOURCE_STATES exposureState = D3D12_RESOURCE_STATE_COMMON;
+    bool                  exposureValid = false;
+    bool                  patchPending  = false;
+    ID3D12Resource*       cbRing     = nullptr;  // NSS constants with the exposure patched in
+    D3D12_RESOURCE_STATES cbRingState = D3D12_RESOURCE_STATE_COMMON;
+    uint64_t              cbRingHead = 0;
+    std::vector<std::pair<const uint32_t*, D3D12_GPU_VIRTUAL_ADDRESS>> patched;
 };
 
 Backend* Get(FfxInterface* i) { return static_cast<Backend*>(i->scratchBuffer); }
@@ -379,6 +414,15 @@ void Flush(Backend* b, ID3D12GraphicsCommandList* cl)
     b->barriers.clear();
 }
 
+void Transition(Backend* b, ID3D12Resource* r, D3D12_RESOURCE_STATES& state, D3D12_RESOURCE_STATES s)
+{
+    Resource tmp;
+    tmp.res   = r;
+    tmp.state = state;
+    Transition(b, &tmp, s);
+    state = tmp.state;
+}
+
 void UavBarrier(ID3D12GraphicsCommandList* cl)
 {
     D3D12_RESOURCE_BARRIER x{};
@@ -503,8 +547,24 @@ FfxErrorCode DestroyBackendContext(FfxInterface* i, FfxUInt32 id)
     {
         b->upload->Unmap(0, nullptr);
         Release(b->upload);
+        Release(b->auxPrepare);
+        Release(b->auxPatch);
+        Release(b->auxRcas);
+        Release(b->auxMotion);
+        Release(b->auxRootSig);
+        Release(b->exposure);
+        Release(b->cbRing);
+        b->exposureValid = b->patchPending = false;
         Release(b->gpuHeap);
         Release(b->cpuHeap);
+        for (CachedPipeline& c : b->pipelines)
+        {
+            Release(c.state.pso);
+            Release(c.state.rootSig);
+        }
+        b->pipelines.clear();
+        b->engine.reset();
+        b->engineW = b->engineH = 0;
         b->jobs.clear();
         b->resources.clear();
     }
@@ -521,6 +581,16 @@ FfxErrorCode GetEffectGpuMemoryUsage(FfxInterface* i, FfxUInt32 id, FfxEffectMem
             D3D12_RESOURCE_DESC d = r.res->GetDesc();
             out->totalUsageInBytes += b->device->GetResourceAllocationInfo(0, 1, &d).SizeInBytes;
         }
+    // a shared engine counts once, for the first context using it
+    for (size_t k = 0; k < b->graphs.size(); ++k)
+    {
+        const Pipeline* p     = b->graphs[k];
+        bool            first = true;
+        for (size_t j = 0; j < k; ++j)
+            first = first && b->graphs[j]->engine != p->engine;
+        if (first && p->context == id)
+            out->totalUsageInBytes += p->engine->MemoryBytes();
+    }
     return FFX_OK;
 }
 
@@ -757,8 +827,8 @@ FfxErrorCode CreateComputePipeline(FfxInterface* i, FfxEffect effect, FfxPass pa
     }
 
     *out = {};
-    auto* p = new Pipeline();
-    int   cbSlot = -1;
+    int cbSlot = -1;
+    Pipeline shape;
     for (uint32_t k = 0; k < blob->bindingCount; ++k)
     {
         const rdnu::ShaderBinding& s = blob->bindings[k];
@@ -774,70 +844,85 @@ FfxErrorCode CreateComputePipeline(FfxInterface* i, FfxEffect effect, FfxPass pa
         }
         dst->slotIndex = s.slot;
         dst->bindCount = 1;
-        std::strncpy(dst->name, s.name, FFX_RESOURCE_NAME_SIZE - 1);
+        std::snprintf(dst->name, sizeof(dst->name), "%s", s.name);
         if (s.kind == rdnu::BindingKind::SrvTexture || s.kind == rdnu::BindingKind::SrvBuffer)
-            p->srvSlots = std::max(p->srvSlots, s.slot + 1);
+            shape.srvSlots = std::max(shape.srvSlots, s.slot + 1);
         if (s.kind == rdnu::BindingKind::UavTexture || s.kind == rdnu::BindingKind::UavBuffer)
-            p->uavSlots = std::max(p->uavSlots, s.slot + 1);
+            shape.uavSlots = std::max(shape.uavSlots, s.slot + 1);
     }
 
-    D3D12_ROOT_PARAMETER   params[3] = {};
-    D3D12_DESCRIPTOR_RANGE srv{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, p->srvSlots, 0, 0, 0};
-    D3D12_DESCRIPTOR_RANGE uav{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, p->uavSlots, 0, 0, 0};
-    UINT                   n = 0;
-    if (cbSlot >= 0)
-    {
-        params[n].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        params[n].Descriptor.ShaderRegister = UINT(cbSlot);
-        ++n;
-    }
-    if (p->srvSlots)
-    {
-        p->srvParam                                 = n;
-        params[n].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[n].DescriptorTable.NumDescriptorRanges = 1;
-        params[n].DescriptorTable.pDescriptorRanges   = &srv;
-        ++n;
-    }
-    if (p->uavSlots)
-    {
-        p->uavParam                                   = n;
-        params[n].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[n].DescriptorTable.NumDescriptorRanges = 1;
-        params[n].DescriptorTable.pDescriptorRanges   = &uav;
-        ++n;
-    }
     std::vector<D3D12_STATIC_SAMPLER_DESC> samplers;
+    std::string                            key = shaderName;
     for (size_t k = 0; k < desc->samplerCount; ++k)
-        samplers.push_back(StaticSampler(desc->samplers[k], UINT(k)));
-    D3D12_ROOT_SIGNATURE_DESC rs{};
-    rs.NumParameters     = n;
-    rs.pParameters       = params;
-    rs.NumStaticSamplers = UINT(samplers.size());
-    rs.pStaticSamplers   = samplers.data();
-    ID3DBlob* sig = nullptr;
-    ID3DBlob* err = nullptr;
-    HRESULT   hr  = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
-    if (SUCCEEDED(hr))
-        hr = b->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&p->rootSig));
-    Release(sig);
-    Release(err);
-    D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
-    pd.pRootSignature = p->rootSig;
-    pd.CS             = {blob->data, blob->size};
-    if (SUCCEEDED(hr))
-        hr = b->device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&p->pso));
-    if (FAILED(hr))
     {
-        Release(p->rootSig);
-        delete p;
-        Print(b, "NSS backend: cannot create the pipeline for " + shaderName);
-        return FFX_ERROR_BACKEND_API_ERROR;
+        const FfxSamplerDescription& d = desc->samplers[k];
+        samplers.push_back(StaticSampler(d, UINT(k)));
+        key += "/" + std::to_string(d.filter) + "," + std::to_string(d.addressModeU) + std::to_string(d.addressModeV) +
+               std::to_string(d.addressModeW);
     }
+    Pipeline* cached = nullptr;
+    for (CachedPipeline& c : b->pipelines)
+        if (c.key == key)
+            cached = &c.state;
+    if (!cached)
+    {
+        D3D12_ROOT_PARAMETER   params[3] = {};
+        D3D12_DESCRIPTOR_RANGE srv{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, shape.srvSlots, 0, 0, 0};
+        D3D12_DESCRIPTOR_RANGE uav{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, shape.uavSlots, 0, 0, 0};
+        UINT                   n = 0;
+        if (cbSlot >= 0)
+        {
+            params[n].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[n].Descriptor.ShaderRegister = UINT(cbSlot);
+            ++n;
+        }
+        if (shape.srvSlots)
+        {
+            shape.srvParam                                = n;
+            params[n].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[n].DescriptorTable.NumDescriptorRanges = 1;
+            params[n].DescriptorTable.pDescriptorRanges   = &srv;
+            ++n;
+        }
+        if (shape.uavSlots)
+        {
+            shape.uavParam                                = n;
+            params[n].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[n].DescriptorTable.NumDescriptorRanges = 1;
+            params[n].DescriptorTable.pDescriptorRanges   = &uav;
+            ++n;
+        }
+        D3D12_ROOT_SIGNATURE_DESC rs{};
+        rs.NumParameters     = n;
+        rs.pParameters       = params;
+        rs.NumStaticSamplers = UINT(samplers.size());
+        rs.pStaticSamplers   = samplers.data();
+        ID3DBlob* sig = nullptr;
+        ID3DBlob* err = nullptr;
+        HRESULT   hr  = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
+        if (SUCCEEDED(hr))
+            hr = b->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&shape.rootSig));
+        Release(sig);
+        Release(err);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = shape.rootSig;
+        pd.CS             = {blob->data, blob->size};
+        if (SUCCEEDED(hr))
+            hr = b->device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&shape.pso));
+        if (FAILED(hr))
+        {
+            Release(shape.rootSig);
+            Print(b, "NSS backend: cannot create the pipeline for " + shaderName);
+            return FFX_ERROR_BACKEND_API_ERROR;
+        }
+        b->pipelines.push_back({key, shape});
+        cached = &b->pipelines.back().state;
+    }
+    auto* p = new Pipeline(*cached);
     out->pipeline      = p;
     out->rootSignature = p->rootSig;
     out->passId        = pass;
-    std::strncpy(out->name, desc->name, FFX_RESOURCE_NAME_SIZE - 1);
+    std::snprintf(out->name, sizeof(out->name), "%s", desc->name);
     return FFX_OK;
 }
 
@@ -848,7 +933,7 @@ FfxErrorCode CreateGraphicsPipeline(FfxInterface* i, FfxEffect, FfxPass, uint32_
 }
 
 FfxErrorCode CreateDataGraphPipeline(FfxInterface* i, FfxEffect effect, FfxPass pass, uint32_t options, const FfxPipelineDescription* desc,
-                                     FfxUInt32, uint32_t width, uint32_t height, FfxPipelineState* out)
+                                     FfxUInt32 context, uint32_t width, uint32_t height, FfxPipelineState* out)
 {
     Backend* b = Get(i);
     if (effect != FFX_EFFECT_NSS || pass != FFX_NSS_PASS_DATA_GRAPH || !(options & NSS_SHADER_PERMUTATION_QUANTIZED))
@@ -869,27 +954,38 @@ FfxErrorCode CreateDataGraphPipeline(FfxInterface* i, FfxEffect effect, FfxPass 
     if (!manifest || !weights)
         return FFX_ERROR_INVALID_ARGUMENT;
 
-    auto* p   = new Pipeline();
-    p->engine = new rdnu::EngineDx12();
-    p->width  = width;
-    p->height = height;
-    rdnu::EngineDx12Desc ed;
-    ed.device        = b->device;
-    ed.manifest      = manifest->data;
-    ed.manifestBytes = manifest->size;
-    ed.weights       = weights->data;
-    ed.weightBytes   = weights->size;
-    ed.maxWidth      = width;
-    ed.maxHeight     = height;
-    ed.useWmma       = b->wmma;
-    std::string err;
-    if (!p->engine->Create(ed, err))
+    // One engine serves every context: its arena is scratch within a frame, and a context
+    // only brings its own size. It is replaced by a larger one when a context needs more;
+    // pipelines already made keep the old one alive.
+    if (!b->engine || width > b->engineW || height > b->engineH)
     {
-        Print(b, "NSS backend: " + err);
-        delete p->engine;
-        delete p;
-        return FFX_ERROR_BACKEND_API_ERROR;
+        rdnu::EngineDx12Desc ed;
+        ed.device        = b->device;
+        ed.manifest      = manifest->data;
+        ed.manifestBytes = manifest->size;
+        ed.weights       = weights->data;
+        ed.weightBytes   = weights->size;
+        ed.maxWidth      = std::max(width, b->engineW);
+        ed.maxHeight     = std::max(height, b->engineH);
+        ed.packed        = true;  // tensor rows are dataGraphSize.x wide
+        ed.useWmma       = b->wmma;
+        auto        engine = std::make_shared<rdnu::EngineDx12>();
+        std::string err;
+        if (!engine->Create(ed, err))
+        {
+            Print(b, "NSS backend: " + err);
+            return FFX_ERROR_BACKEND_API_ERROR;
+        }
+        b->engine  = engine;
+        b->engineW = ed.maxWidth;
+        b->engineH = ed.maxHeight;
     }
+    auto* p    = new Pipeline();
+    p->context = context;
+    p->engine  = b->engine;
+    p->width   = width;
+    p->height  = height;
+    b->graphs.push_back(p);
     *out                = {};
     out->pipeline       = p;
     out->passId         = pass;
@@ -898,7 +994,7 @@ FfxErrorCode CreateDataGraphPipeline(FfxInterface* i, FfxEffect effect, FfxPass 
     std::strncpy(out->srvTensorBindings[0].name, "Resource_0_input", FFX_RESOURCE_NAME_SIZE - 1);
     std::strncpy(out->uavTensorBindings[0].name, "Resource_1_output", FFX_RESOURCE_NAME_SIZE - 1);
     std::strncpy(out->uavTensorBindings[1].name, "Resource_2_output", FFX_RESOURCE_NAME_SIZE - 1);
-    std::strncpy(out->name, desc->name, FFX_RESOURCE_NAME_SIZE - 1);
+    std::snprintf(out->name, sizeof(out->name), "%s", desc->name);
     return FFX_OK;
 }
 
@@ -907,16 +1003,15 @@ FfxErrorCode CreateOpticalFlowPipeline(FfxInterface*, const char*, const FfxOpti
     return FFX_ERROR_INVALID_ARGUMENT;
 }
 
-FfxErrorCode DestroyPipeline(FfxInterface*, FfxPipelineState* state, FfxUInt32)
+FfxErrorCode DestroyPipeline(FfxInterface* i, FfxPipelineState* state, FfxUInt32)
 {
     if (!state)
         return FFX_ERROR_INVALID_POINTER;
     if (auto* p = static_cast<Pipeline*>(state->pipeline))
     {
-        Release(p->pso);
-        Release(p->rootSig);
-        delete p->engine;
-        delete p;
+        auto& g = Get(i)->graphs;
+        g.erase(std::remove(g.begin(), g.end(), p), g.end());
+        delete p;  // the PSO and root signature stay cached
     }
     state->pipeline      = nullptr;
     state->rootSignature = nullptr;
@@ -932,6 +1027,150 @@ FfxErrorCode ScheduleGpuJob(FfxInterface* i, const FfxGpuJobDescription* job)
 {
     Get(i)->jobs.push_back(*job);
     return FFX_OK;
+}
+
+// ---------------------------------------------------------------------------- exposure, RCAS
+
+// One root signature: 4 constants (b0), SRV table t0..t1, UAV table u0.
+bool CreateAux(Backend* b)
+{
+    if (b->auxRootSig)
+        return true;
+    D3D12_DESCRIPTOR_RANGE srv{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0};
+    D3D12_DESCRIPTOR_RANGE uav{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
+    D3D12_ROOT_PARAMETER   p[3] = {};
+    p[0].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    p[0].Constants.Num32BitValues            = kAuxConstants;
+    p[1].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    p[1].DescriptorTable.NumDescriptorRanges = 1;
+    p[1].DescriptorTable.pDescriptorRanges   = &srv;
+    p[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    p[2].DescriptorTable.NumDescriptorRanges = 1;
+    p[2].DescriptorTable.pDescriptorRanges   = &uav;
+    D3D12_ROOT_SIGNATURE_DESC rs{};
+    rs.NumParameters = 3;
+    rs.pParameters   = p;
+    ID3DBlob* sig = nullptr;
+    ID3DBlob* err = nullptr;
+    HRESULT   hr  = D3D12SerializeRootSignature(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
+    if (SUCCEEDED(hr))
+        hr = b->device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&b->auxRootSig));
+    Release(sig);
+    Release(err);
+    auto pso = [&](const char* name, ID3D12PipelineState*& out) {
+        const rdnu::ShaderBlob* s = rdnu::FindShader(name);
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = b->auxRootSig;
+        if (s)
+            pd.CS = {s->data, s->size};
+        return s && SUCCEEDED(hr) && SUCCEEDED(hr = b->device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&out)));
+    };
+    auto create = [&](const D3D12_RESOURCE_DESC& d, ID3D12Resource*& out) {
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        return SUCCEEDED(b->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&out)));
+    };
+    D3D12_RESOURCE_DESC tex{};
+    tex.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    tex.Width            = 1;
+    tex.Height           = 1;
+    tex.DepthOrArraySize = 1;
+    tex.MipLevels        = 1;
+    tex.Format           = DXGI_FORMAT_R32_FLOAT;
+    tex.SampleDesc.Count = 1;
+    tex.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    D3D12_RESOURCE_DESC buf = tex;
+    buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buf.Width     = kCbRingBytes;
+    buf.Format    = DXGI_FORMAT_UNKNOWN;
+    buf.Layout    = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (!pso("rdnu_exposure", b->auxPrepare) || !pso("rdnu_exposure_patch", b->auxPatch) || !pso("rcas", b->auxRcas) ||
+        !pso("rdnu_motion", b->auxMotion) || !create(tex, b->exposure) || !create(buf, b->cbRing))
+    {
+        Print(b, "NSS backend: cannot create the exposure, motion and sharpening passes");
+        return false;
+    }
+    b->exposureState = b->cbRingState = D3D12_RESOURCE_STATE_COMMON;
+    return true;
+}
+
+// Binds the aux root signature with an SRV table (t0, t1) and a UAV table (u0).
+void BindAux(Backend* b, ID3D12GraphicsCommandList* cl, ID3D12PipelineState* pso, const uint32_t (&constants)[kAuxConstants], ID3D12Resource* t0,
+             ID3D12Resource* t1, ID3D12Resource* u0, bool u0Buffer)
+{
+    Resource       r0, r1, r2;
+    r0.res = t0, r1.res = t1, r2.res = u0;
+    const uint32_t base = AllocGpu(b, 3);
+    SrvView(b, t0 ? &r0 : nullptr, false, Cpu(b->gpuHeap, b->descSize, base));
+    SrvView(b, t1 ? &r1 : nullptr, false, Cpu(b->gpuHeap, b->descSize, base + 1));
+    UavView(b, &r2, u0Buffer, 0, Cpu(b->gpuHeap, b->descSize, base + 2));
+    cl->SetComputeRootSignature(b->auxRootSig);
+    cl->SetPipelineState(pso);
+    cl->SetComputeRoot32BitConstants(0, kAuxConstants, constants, 0);
+    cl->SetComputeRootDescriptorTable(1, Gpu(b->gpuHeap, b->descSize, base));
+    cl->SetComputeRootDescriptorTable(2, Gpu(b->gpuHeap, b->descSize, base + 2));
+}
+
+void ClearExposure(Backend* b, ID3D12GraphicsCommandList* cl, float value)
+{
+    Transition(b, b->exposure, b->exposureState, kUavState);
+    Flush(b, cl);
+    Resource r;
+    r.res              = b->exposure;
+    const uint32_t g   = AllocGpu(b, 1);
+    const uint32_t c   = b->cpuHead;
+    b->cpuHead         = (b->cpuHead + 1) % kCpuDescriptors;
+    UavView(b, &r, false, 0, Cpu(b->gpuHeap, b->descSize, g));
+    UavView(b, &r, false, 0, Cpu(b->cpuHeap, b->descSize, c));
+    const float v[4] = {value, value, value, value};
+    cl->ClearUnorderedAccessViewFloat(Gpu(b->gpuHeap, b->descSize, g), Cpu(b->cpuHeap, b->descSize, c), b->exposure, v, 0, nullptr);
+    UavBarrier(cl);
+}
+
+// Copies each distinct NSS constant buffer of the queued jobs into the constant ring and
+// overwrites its exposure with the prepared value.
+void PatchConstants(Backend* b, ID3D12GraphicsCommandList* cl)
+{
+    b->patched.clear();
+    std::vector<std::pair<uint64_t, uint64_t>> copies;  // upload offset, ring offset
+    for (const FfxGpuJobDescription& job : b->jobs)
+    {
+        if (job.jobType != FFX_GPU_JOB_COMPUTE || !job.computeJobDescriptor.pipeline.constCount)
+            continue;
+        const FfxConstantBuffer& cb = job.computeJobDescriptor.cbs[0];
+        bool                     seen = false;
+        for (auto& p : b->patched)
+            seen |= p.first == cb.data;
+        if (seen || cb.num32BitEntries * 4 < sizeof(NssConstants))
+            continue;
+        const uint64_t bytes = (uint64_t(cb.num32BitEntries) * 4 + 255) & ~uint64_t(255);
+        if (b->uploadHead + bytes > kUploadBytes)
+            b->uploadHead = 0;
+        if (b->cbRingHead + bytes > kCbRingBytes)
+            b->cbRingHead = 0;
+        std::memcpy(b->uploadPtr + b->uploadHead, cb.data, cb.num32BitEntries * 4);
+        copies.push_back({b->uploadHead, b->cbRingHead});
+        b->patched.push_back({cb.data, b->cbRing->GetGPUVirtualAddress() + b->cbRingHead});
+        b->uploadHead += bytes;
+        b->cbRingHead += bytes;
+    }
+    if (copies.empty())
+        return;
+    Transition(b, b->cbRing, b->cbRingState, D3D12_RESOURCE_STATE_COPY_DEST);
+    Flush(b, cl);
+    for (auto& c : copies)
+        cl->CopyBufferRegion(b->cbRing, c.second, b->upload, c.first, sizeof(NssConstants));
+    Transition(b, b->cbRing, b->cbRingState, kUavState);
+    Transition(b, b->exposure, b->exposureState, kSrvState);
+    Flush(b, cl);
+    for (auto& c : copies)
+    {
+        const uint32_t k[kAuxConstants] = {uint32_t(c.second + offsetof(NssConstants, _Exposure))};
+        BindAux(b, cl, b->auxPatch, k, b->exposure, nullptr, b->cbRing, true);
+        cl->Dispatch(1, 1, 1);
+    }
+    Transition(b, b->cbRing, b->cbRingState, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    Flush(b, cl);
 }
 
 // ---------------------------------------------------------------------------------- execution
@@ -953,7 +1192,13 @@ void ExecuteCompute(Backend* b, ID3D12GraphicsCommandList* cl, const FfxComputeJ
     cl->SetComputeRootSignature(p->rootSig);
     cl->SetPipelineState(p->pso);
     UINT param = 0;
-    if (s.constCount)
+    D3D12_GPU_VIRTUAL_ADDRESS patchedCb = 0;
+    for (auto& pc : b->patched)
+        if (s.constCount && pc.first == j.cbs[0].data)
+            patchedCb = pc.second;
+    if (patchedCb)
+        cl->SetComputeRootConstantBufferView(param++, patchedCb);
+    else if (s.constCount)
     {
         const FfxConstantBuffer& cb    = j.cbs[0];
         const uint64_t           bytes = (uint64_t(cb.num32BitEntries) * 4 + 255) & ~uint64_t(255);
@@ -1054,6 +1299,9 @@ FfxErrorCode ExecuteGpuJobs(FfxInterface* i, FfxCommandList commandList, FfxUInt
     Backend* b  = Get(i);
     auto*    cl = static_cast<ID3D12GraphicsCommandList*>(commandList);
     cl->SetDescriptorHeaps(1, &b->gpuHeap);
+    if (b->patchPending)
+        PatchConstants(b, cl);
+    b->patchPending     = false;
     FfxErrorCode result = FFX_OK;
     for (const FfxGpuJobDescription& job : b->jobs)
     {
@@ -1071,6 +1319,7 @@ FfxErrorCode ExecuteGpuJobs(FfxInterface* i, FfxCommandList commandList, FfxUInt
         }
     }
     b->jobs.clear();
+    b->patched.clear();
     return result;
 }
 }  // namespace
@@ -1172,4 +1421,88 @@ FfxResource ffxGetResourceDX12(ID3D12Resource* resource, FfxResourceStates state
 void ffxNssDx12ForceDp4a(bool force)
 {
     g_forceDp4a = force;
+}
+
+FfxErrorCode ffxNssDx12PrepareExposure(FfxInterface* i, ID3D12GraphicsCommandList* cl, const FfxNssDx12Exposure& e)
+{
+    Backend* b = Get(i);
+    if (!b->refCount || !CreateAux(b))
+        return FFX_ERROR_BACKEND_API_ERROR;
+    const float pre = e.preExposure > 0 ? e.preExposure : 1.0f;
+    cl->SetDescriptorHeaps(1, &b->gpuHeap);
+    if (!e.texture && !e.colour)
+        ClearExposure(b, cl, 1.0f / pre);
+    else
+    {
+        ID3D12Resource*       src   = e.texture ? e.texture : e.colour;
+        D3D12_RESOURCE_STATES state = e.texture ? e.textureState : e.colourState;
+        Transition(b, src, state, kSrvState);
+        Transition(b, b->exposure, b->exposureState, kUavState);
+        Flush(b, cl);
+        uint32_t k[kAuxConstants] = {e.texture ? 0u : 1u, 0, e.width, e.height};
+        const float scale = 1.0f / pre;
+        std::memcpy(&k[1], &scale, 4);
+        BindAux(b, cl, b->auxPrepare, k, src, nullptr, b->exposure, false);
+        cl->Dispatch(1, 1, 1);
+        Transition(b, src, state, e.texture ? e.textureState : e.colourState);
+        UavBarrier(cl);
+    }
+    Transition(b, b->exposure, b->exposureState, kSrvState);
+    Flush(b, cl);
+    b->exposureValid = b->patchPending = true;
+    return FFX_OK;
+}
+
+FfxErrorCode ffxNssDx12PrepareMotion(FfxInterface* i, ID3D12GraphicsCommandList* cl, const FfxNssDx12Motion& m)
+{
+    Backend* b = Get(i);
+    if (!b->refCount || !m.source || !m.target || !CreateAux(b))
+        return FFX_ERROR_BACKEND_API_ERROR;
+    cl->SetDescriptorHeaps(1, &b->gpuHeap);
+    D3D12_RESOURCE_STATES src = m.sourceState, dst = kSrvState;
+    Transition(b, m.source, src, kSrvState);
+    Transition(b, m.target, dst, kUavState);
+    Flush(b, cl);
+    const bool display = m.sourceWidth != 0 && m.sourceHeight != 0;
+    const float f[6]    = {m.scale[0], m.scale[1], m.cancel[0], m.cancel[1], m.jitter[0], m.jitter[1]};
+    uint32_t k[kAuxConstants] = {m.renderWidth, m.renderHeight, display ? m.sourceWidth : m.renderWidth,
+                                 display ? m.sourceHeight : m.renderHeight};
+    std::memcpy(&k[4], f, sizeof(f));
+    k[10] = display;
+    BindAux(b, cl, b->auxMotion, k, m.source, nullptr, m.target, false);
+    cl->Dispatch((m.renderWidth + 7) / 8, (m.renderHeight + 7) / 8, 1);
+    Transition(b, m.source, src, m.sourceState);
+    Transition(b, m.target, dst, kSrvState);
+    Flush(b, cl);
+    return FFX_OK;
+}
+
+FfxErrorCode ffxNssDx12Sharpen(FfxInterface* i, ID3D12GraphicsCommandList* cl, ID3D12Resource* input, D3D12_RESOURCE_STATES inputState,
+                               ID3D12Resource* output, D3D12_RESOURCE_STATES outputState, uint32_t width, uint32_t height, float sharpness)
+{
+    Backend* b = Get(i);
+    if (!b->refCount || !CreateAux(b))
+        return FFX_ERROR_BACKEND_API_ERROR;
+    cl->SetDescriptorHeaps(1, &b->gpuHeap);
+    if (!b->exposureValid)
+    {
+        ClearExposure(b, cl, 1.0f);
+        b->exposureValid = true;
+    }
+    D3D12_RESOURCE_STATES in = inputState, out = outputState;
+    Transition(b, input, in, kSrvState);
+    Transition(b, output, out, kUavState);
+    Transition(b, b->exposure, b->exposureState, kSrvState);
+    Flush(b, cl);
+    // FSR 3: sharpness 0..1 maps to 2..0 stops of RCAS attenuation
+    const float    con  = std::exp2(-(2.0f - 2.0f * std::min(std::max(sharpness, 0.0f), 1.0f)));
+    uint32_t       k[kAuxConstants] = {width, height};
+    std::memcpy(&k[2], &con, 4);
+    BindAux(b, cl, b->auxRcas, k, input, b->exposure, output, false);
+    cl->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+    UavBarrier(cl);
+    Transition(b, input, in, inputState);
+    Transition(b, output, out, outputState);
+    Flush(b, cl);
+    return FFX_OK;
 }

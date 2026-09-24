@@ -57,6 +57,8 @@ def main():
         "colour": np.concatenate([colour, ones], -1),
         "depth": img("depth")[:, :h, :w],
         "motion": -motion[..., ::-1],
+        # display resolution motion in display pixels, for FSR's DISPLAY_RESOLUTION_MOTION_VECTORS
+        "motion_hr": -img("motion")[:, :h * scale, :w * scale][..., ::-1],
         "jitter": jitter[:, ::-1],
         "exposure": np.exp(f.get_tensor("exposure")[t].reshape(-1)),
         # near, far, vertical fov, infinite far plane: what a game passes to the SDK

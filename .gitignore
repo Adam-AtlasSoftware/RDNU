@@ -38,3 +38,6 @@ __pycache__/
 Thumbs.db
 .DS_Store
 docs/DEV_STATUS.md
+
+# ===== vkd3d-proton pipeline cache (tests on Linux) =====
+vkd3d-proton.cache*

@@ -131,6 +131,7 @@ struct PlanConfig
     uint32_t maxHeight   = 0;
     uint32_t inputPitch  = 0;    // pixels per row of the external input tensor (0: maxWidth)
     uint32_t kpnPitch    = 0;    // pixels per row of the KPN buffer (0: maxWidth / 4)
+    bool     packed      = false;  // input and KPN rows follow each frame's width instead
     bool     useWmma     = false;
 };
 

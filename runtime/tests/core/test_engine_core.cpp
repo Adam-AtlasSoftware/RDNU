@@ -154,6 +154,16 @@ void CheckPlan(const Manifest& m, uint32_t renderW, uint32_t renderH, bool wmma)
     CHECK(!plan.Update(W + 8, H, err), "update beyond the maximum accepted");
     CHECK(!plan.Update(W - 4, H, err), "update to a non-multiple of 8 accepted");
 
+    // packed: the input and KPN rows follow the frame (Arm's tensors, one context per size)
+    cfg.packed = true;
+    Plan packed;
+    CHECK(packed.Build(m, cfg, err) && packed.Update(w2, h2, err), "packed %ux%u: %s", w2, h2, err.c_str());
+    CHECK(packed.TensorOfKind(TensorKind::Input).pitchPixels == w2, "packed input pitch");
+    CHECK(packed.TensorOfKind(TensorKind::Kpn).pitchPixels == w2 / 4, "packed KPN pitch");
+    CHECK(packed.Dispatches().front().constants.inPitch == w2 * 12, "packed first layer reads the frame's rows");
+    for (const Dispatch& d : packed.Dispatches())
+        CheckBounds(packed, m, d);
+
     std::printf("  %4ux%-4u -> %4ux%-4u %-5s arena %6.1f MB, %zu dispatches, %zu WMMA\n", renderW, renderH, W, H,
                 wmma ? "wmma" : "dp4a", arena / 1048576.0, plan.Dispatches().size(), wmmaCount);
 }
@@ -315,11 +325,15 @@ int main(int argc, char** argv)
         if (CompareGolden(plan, m, net, g))
             std::printf("  %ux%u ok\n", plan.Width(), plan.Height());
         const rdnut::Tensor& in2 = g2.at("input_nhwc");
-        CHECK(plan.Update(in2.dims[1], in2.dims[0], err), "%s", err.c_str());
-        WriteInput(plan, net, in2);
-        net.Run(plan);
-        if (CompareGolden(plan, m, net, g2))
-            std::printf("  %ux%u in the same arena ok\n", plan.Width(), plan.Height());
+        for (bool packed : {false, true})
+        {
+            cfg.packed = packed;
+            CHECK(plan.Build(m, cfg, err) && plan.Update(in2.dims[1], in2.dims[0], err), "%s", err.c_str());
+            WriteInput(plan, net, in2);
+            net.Run(plan);
+            if (CompareGolden(plan, m, net, g2))
+                std::printf("  %ux%u in the same arena%s ok\n", plan.Width(), plan.Height(), packed ? ", packed" : "");
+        }
     }
 
     std::printf("%s (%d failures)\n", g_failures ? "FAIL" : "PASS", g_failures);

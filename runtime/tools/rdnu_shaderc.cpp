@@ -155,6 +155,9 @@ int main(int argc, char** argv)
     std::vector<Job> jobs;
     jobs.push_back({"nss_fill", net + "/nss_fill.hlsl", "cs_6_2", {}, {}, {}});
     jobs.push_back({"rcas", nss + "/ffx_rcas_pass.hlsl", "cs_6_2", {}, {}, {}});
+    jobs.push_back({"rdnu_exposure", nss + "/rdnu_exposure.hlsl", "cs_6_2", {}, {}, {}});
+    jobs.push_back({"rdnu_exposure_patch", nss + "/rdnu_exposure.hlsl", "cs_6_2", {"RDNU_EXPOSURE_PATCH=1"}, {}, {}});
+    jobs.push_back({"rdnu_motion", nss + "/rdnu_motion.hlsl", "cs_6_2", {}, {}, {}});
     for (const rdnu::KernelKey& k : plan.RequiredKernels(wmma))
     {
         Job j{k.Name(), net + "/" + k.Source(), "cs_6_4", k.Defines(), {net}, {}};
