@@ -123,26 +123,23 @@ class Run:
         out = self.dir / "output"
         results = {}
         models = [("start", self.start_weights(), "fp32")]
-        if self.state.get("fp32"):
-            models.append(("fp32", self.state["fp32"], "fp32"))
-        if self.state.get("qat"):
-            models.append(("qat", self.state["qat"], "qat_int8"))
+        for kind, mode in (("fp32", "fp32"), ("qat", "qat_int8")):
+            if (self.dir / kind).is_dir():
+                self.state.setdefault(kind, str(self.checkpoint(kind)))
+                models.append((kind, self.state[kind], mode))
         for name, path, kind in models:
             before = set(out.glob("eval_metrics_*.json"))
             self.sh([self.gym, "-c", self.config, "evaluate", "--model-path", path, "--model-type", kind])
             new = set(out.glob("eval_metrics_*.json")) - before
             if new:
                 results[name] = json.loads(max(new).read_text())
-        self.save(evaluate=results)
-        metrics = sorted({m for r in results.values() for m in r})
-        print("%-6s" % "" + "".join("%14s" % m for m in metrics))
-        for name, r in results.items():
-            cells = []
-            for m in metrics:
-                v = r.get(m, {})
-                v = v.get("mean", next(iter(v.values()), None)) if isinstance(v, dict) else v
-                cells.append("%14.4f" % v if isinstance(v, (int, float)) else "%14s" % "-")
-            print("%-6s" % name + "".join(cells))
+        # the gym streams each metric per frame; the last frame holds the run's mean
+        summary = {name: {m: v[max(v, key=int)] for m, v in r.items() if isinstance(v, dict) and v} for name, r in results.items()}
+        self.save(evaluate=summary)
+        metrics = sorted({m for r in summary.values() for m in r})
+        print("%-6s" % "" + "".join("%18s" % m for m in metrics))
+        for name, r in summary.items():
+            print("%-6s" % name + "".join("%18.4f" % r[m] if isinstance(r.get(m), (int, float)) else "%18s" % "-" for m in metrics))
 
     def stage_export(self):
         fp32 = self.state.get("fp32") or self.checkpoint("fp32")

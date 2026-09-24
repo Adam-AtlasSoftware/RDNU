@@ -79,7 +79,9 @@ FSR 4.1, not on PSNR alone (§5 of the quality plan).
 manifest carries the learned input quantiser scale; `rdnu_shaderc` passes it to the pre-process
 shader as `RDNU_INPUT_SCALE`, so a retrained model needs no shader edits. The sigmoid outputs use a
 fixed quantiser (1/254), so the post-process pass is unchanged. `test_engine_core` then checks the
-runtime's integer path against the exporter's golden for the new weights, bit for bit.
+runtime's integer path against the exporter's golden for the new weights, bit for bit; the D3D12
+tests (`ctest -R 'dx12|fsr_api'`) run the new model end to end. The Vulkan pass test compares
+against Arm's GLSL, which carries the released model's constants, so it applies to that model only.
 
 Smoke test without a GPU, one epoch on one sequence: `retrain.py runs/smoke --data ... --cpu
 --batch 1 --unroll 8 --epochs 1 --qat-epochs 1`.
