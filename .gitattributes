@@ -30,3 +30,6 @@ CMakeLists.txt text eol=lf
 
 # --- Model weights via Git LFS (scoped to the runtime models tree) ---
 runtime/models/**/*.bin filter=lfs diff=lfs merge=lfs -text
+
+# Repacked NSS weights are small and must build without git-lfs
+runtime/models/NSS_INT8/** -filter -diff -merge binary

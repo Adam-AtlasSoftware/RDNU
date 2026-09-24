@@ -1,0 +1,15 @@
+ML SDK Scenario Runner - revision 197a36e
+Source Code: https://github.com/arm/ai-ml-sdk-scenario-runner
+License: Apache-2.0 (https://github.com/arm/ai-ml-sdk-scenario-runner/blob/main/LICENSES/Apache-2.0.txt)
+Copyright Notice: "Copyright 2022-2025 Arm Limited and/or its affiliates <open-source-office@arm.com>"
+
+ML Emulation Layer for Vulkan® - revision 788ac99
+Source Code: https://github.com/arm/ai-ml-emulation-layer-for-vulkan
+License: Apache-2.0 (https://github.com/arm/ai-ml-emulation-layer-for-vulkan/blob/main/LICENSES/Apache-2.0.txt)
+Copyright Notice: "Copyright 2022-2025 Arm Limited and/or its affiliates <open-source-office@arm.com>"
+
+Amazon Lumberyard Bistro
+Asset page: http://developer.nvidia.com/orca/amazon-lumberyard-bistro
+Download page: https://casual-effects.com/g3d/data10/research/model/bistro/Exterior.zip
+License: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+Copyright Notice: "Copyright 2017 Amazon Lumberyard"
