@@ -3,11 +3,12 @@
 // same inputs and its outputs are compared, so the port is checked against the shipped
 // reference on real content. Prints PSNR against the ground truth and writes PPM previews.
 //
-//   test_passes_vk <golden dir> [--frames N] [--scale S] [--wmma] [--out dir]
+//   test_passes_vk <golden dir> [--frames N] [--scale S] [--sharpen stops] [--wmma] [--out dir]
 //
 // <golden dir> holds nss.rdnm and nss_w8.bin (nss_export.py) and nss_frames.rdnut
 // (nss_pass_frames.py). --scale 2 uses the static 2x filter, any other factor the dynamic
-// offset LUT. Needs DXC ($DXC) and glslangValidator ($GLSLANG or PATH).
+// offset LUT. --sharpen also runs the RCAS pass (0 strongest). Needs DXC ($DXC) and
+// glslangValidator ($GLSLANG or PATH).
 #include "../common/rdnut.h"
 #include "net_runner.h"
 
@@ -478,10 +479,11 @@ uint32_t Gcd(uint32_t a, uint32_t b) { return b ? Gcd(b, a % b) : a; }
 int main(int argc, char** argv)
 {
     if (argc < 2)
-        return std::printf("usage: test_passes_vk <golden dir> [--frames N] [--scale S] [--wmma] [--out dir]\n"), 1;
+        return std::printf("usage: test_passes_vk <golden dir> [--frames N] [--scale S] [--sharpen stops] [--wmma] [--out dir]\n"), 1;
     std::string dir = argv[1], outDir = "/tmp/rdnu_passes";
     uint32_t    frames = 4;
     double      scale  = 2;
+    float       sharpen = -1;
     bool        wmma   = false;
     for (int i = 2; i < argc; ++i)
     {
@@ -489,6 +491,8 @@ int main(int argc, char** argv)
             frames = uint32_t(std::atoi(argv[++i]));
         else if (!std::strcmp(argv[i], "--scale") && i + 1 < argc)
             scale = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--sharpen") && i + 1 < argc)
+            sharpen = float(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i], "--out") && i + 1 < argc)
             outDir = argv[++i];
         else if (!std::strcmp(argv[i], "--wmma"))
@@ -554,6 +558,15 @@ int main(int argc, char** argv)
     const Fmt debugFmt = vk.StorageFormat(VkFmt(Fmt::R11G11B10F)) ? Fmt::R11G11B10F : Fmt::RGBA16F;
     Tex tDebug = make(DW, DH, debugFmt), sDebug = make(DW, DH, debugFmt);
     Tex tFeedback{net.temporal, Fmt::RGBA8S};
+    Tex tSharp = make(DW, DH, Fmt::RGBA16F);
+    vkc::Buffer   rcasCb = vk.CreateBuffer(256);
+    vkc::Pipeline rcas;
+    if (sharpen >= 0 &&
+        !vk.CreatePipeline(kHlsl + "/ffx_rcas_pass.hlsl", "main", "cs_6_2", {}, {}, "rdnu_rcas",
+                           {{vkc::kShiftB, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}, {vkc::kShiftT, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE},
+                            {vkc::kShiftU, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}},
+                           rcas, err))
+        return std::printf("%s\n", err.c_str()), 1;
     vkc::Buffer sTensor = vk.CreateBuffer(plan.InputBytes());
 
     Frame fr{vk};
@@ -636,7 +649,17 @@ int main(int argc, char** argv)
             !fr.Run(kDebugView, main, shadow, groups(DW, 16), groups(DH, 16), err))
             return std::printf("%s\n", err.c_str()), 1;
 
-        std::vector<uint8_t> o = fr.Read({&tOutput});
+        if (sharpen >= 0)
+        {
+            struct { uint32_t w, h; float exposure, sharpness; } rc = {DW, DH, e, std::exp2(-sharpen)};
+            std::memcpy(rcasCb.mapped, &rc, sizeof(rc));
+            vkc::Resource cbr{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &rcasCb, 0, 256}, in, outr;
+            in.type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, in.image = &tOutput.img;
+            outr.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, outr.image = &tSharp.img;
+            if (!vk.Dispatch(rcas, {{vkc::kShiftB, cbr}, {vkc::kShiftT, in}, {vkc::kShiftU, outr}}, groups(DW, 8), groups(DH, 8), 1, err))
+                return std::printf("%s\n", err.c_str()), 1;
+        }
+        std::vector<uint8_t> o = fr.Read({sharpen >= 0 ? &tSharp : &tOutput});
         out = {std::vector<float>(size_t(DW) * DH * 3), DW, DH};
         for (size_t i = 0; i < size_t(DW) * DH; ++i)
             for (int k = 0; k < 3; ++k)
@@ -660,7 +683,8 @@ int main(int argc, char** argv)
                         bilinear.v[(size_t(y) * DW + x) * 3 + k] =
                             (at(x0, y0) * (1 - fx) + at(x1, y0) * fx) * (1 - fy) + (at(x0, y1) * (1 - fx) + at(x1, y1) * fx) * fy;
                     }
-            std::printf("    psnr (tonemapped)   nss %.2f dB   bilinear %.2f dB\n", Psnr(out, gt, e), Psnr(bilinear, gt, e));
+            std::printf("    psnr (tonemapped)   nss%s %.2f dB   bilinear %.2f dB\n", sharpen >= 0 ? "+rcas" : "", Psnr(out, gt, e),
+                        Psnr(bilinear, gt, e));
         }
     }
 
@@ -680,7 +704,10 @@ int main(int argc, char** argv)
     for (Tex* t : {&tColour, &tDepth, &tMotion, &tDepthTm1, &sDepthTm1, &tLuma[0], &tLuma[1], &sLuma, &tNearest, &sNearest, &tDisocc,
                    &tLut, &sLut, &tHistory[0], &tHistory[1], &sHistory, &tOutput, &sOutput, &tDebug, &sDebug})
         vk.Destroy(t->img);
-    vk.Destroy(sTensor), vk.Destroy(fr.cb);
+    if (sharpen >= 0)
+        vk.Destroy(rcas);
+    vk.Destroy(tSharp.img);
+    vk.Destroy(sTensor), vk.Destroy(fr.cb), vk.Destroy(rcasCb);
     net.Release();
     std::printf("%s\n", fr.ok ? "PASS" : "FAIL");
     return fr.ok ? 0 : 2;
