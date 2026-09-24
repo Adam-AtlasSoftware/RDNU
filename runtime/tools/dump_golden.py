@@ -487,7 +487,7 @@ def main():
         write_rdnut(os.path.join(OUT_DIR, fname), {
             "input": x, "golden_out": y,
             "i8.w": np.ascontiguousarray(wi8), "i8.scale": w_scale,
-            "i8.ascale": np.array([a_scale], np.float32), "i8.bias": bias,
+            "i8.ascale": np.array([a_scale, 0, -127, 127], np.float32), "i8.bias": bias,
             "i8p": np.array([kh, kw, ph, pw, sh, sw, groups], np.float32),
         })
         print(f"  bundle {fname:<24} {layer:<28} in{tuple(x.shape)} w{tuple(wi8.shape)} -> out{tuple(y.shape)} "
@@ -562,7 +562,7 @@ def main():
                 wi8, ws, a, b = int8_layer(ents8, blob8, wn)
                 t[wn + ".w"] = np.ascontiguousarray(wi8)
                 t[wn + ".scale"] = ws
-                t[wn + ".ascale"] = np.array([a], np.float32)
+                t[wn + ".ascale"] = np.array([a, 0, -127, 127], np.float32)
                 t[wn + ".bias"] = b
             elif wn in ok:                      # non-quantized (shift buffers, skip_alphas) stay FP
                 t[wn] = ok[wn].numpy()

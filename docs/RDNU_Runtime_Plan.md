@@ -1,3 +1,5 @@
+> Superseded for the model-specific parts by [NSS_Runtime_Plan.md](NSS_Runtime_Plan.md) (2026-09-24): the network is now Arm NSS. §2–3 (engine architecture, tensor layout, binding model, WMMA conv) remain the engine design.
+
 # RDNU runtime: state, findings, and the plan to a shippable upscaler
 
 Supersedes the phase table in [WMMA_Implementation_Plan.md](WMMA_Implementation_Plan.md).

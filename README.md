@@ -1,124 +1,81 @@
 # Radeon Decoupled Neural Upscaler (RDNU)
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch 2.5+](https://img.shields.io/badge/PyTorch-2.5+-ee4c2c.svg)](https://pytorch.org/)
+An open ML temporal upscaler for AMD RDNA2 and RDNA3 GPUs, in the class of FSR 4 and DLSS:
+jittered low-resolution colour, depth and motion vectors in, anti-aliased high-resolution frames
+out. The runtime is DirectX 12 compute with INT8 networks (DP4a on RDNA2, wave-matrix on RDNA3)
+and exposes the FidelityFX API so it can drop into the FSR sample or be injected into games.
 
-## Overview
+The network is [Arm Neural Super Sampling](https://huggingface.co/Arm/neural-super-sampling)
+(148K params, ~2.8K MAC per output pixel at 2×), chosen after the review in
+[docs/Model_Candidates.md](docs/Model_Candidates.md). The earlier RDG-based model (CNN with
+G-buffer guidance, trained here on GameIR/M3VIR/vKITTI2/Sintel) is kept under `RDG/`, `scripts/`
+and `runtime/models/` as the reference baseline.
 
-Radeon Decoupled Neural Upscaler (RDNU) is a ML-based spatial-temporal upscaling backend optimized for the AMD Radeon RX 7900 XTX (GFX11/RDNA3 architecture).
+## Status
 
-This project implements a recurrent neural network upscaler that evaluates native game engine G-Buffers to reconstruct high-resolution outputs.
+- NSS backbone exported to the engine's bundle format with per-layer goldens (fp32 and INT8 QAT);
+  the harness graph for it is written and awaits GPU validation.
+- The RDG network runs end to end on the GPU in the harness (bit-exact INT8, WMMA 1×1 conv).
+- Not yet: the NSS pre/post passes in HLSL, the DX12 backend for Arm's NSS component, sample
+  integration. Order of work: [docs/NSS_Runtime_Plan.md](docs/NSS_Runtime_Plan.md).
 
-## Features
-
-- **Recurrent G-Buffer Guidance:** The model ingests multi-frame temporal histories (currently an 8-frame window) alongside native engine data, including Depth, Surface Normals, Albedo (BRDF), and High-Precision Optical Flow.
-- **Fractional Scaling & RCAS:** Implements fractional scale handling (e.g., 1.5x downscaling to mimic the DLSS/FSR "Quality" preset) with frequency-preserving antialiased interpolation and Robust Contrast Adaptive Sharpening (RCAS) for micro-detail recovery.
-- **RDNA3 AI Accelerator Optimization:** Targets `__builtin_amdgcn_wmma` for increased throughput over standard vector ALU paths.
-- **FP16 and FP8 Precision:** Operates on mixed-precision tensors to reduce VRAM bandwidth utilization.
-- **Wave32 Alignment:** Configured to respect RDNA3 Compute Unit micro-architectural constraints, maintaining optimal active wavefront occupancy.
-
-## Architectural Constraints: RDNA3 and WMMA
-
-Meeting strict per-frame inference budgets at high output resolutions necessitates specific hardware alignment:
-
-*   **Wave32 Execution & Register Layout:** In Wave32 mode, data in the Vector General Purpose Registers (VGPRs) is replicated between half-waves. Matrix input mappings must satisfy internal crossbar logic.
-*   **Occupancy & Register Pressure:** Kernel configurations must strictly manage VGPR consumption to prevent drops in active wavefronts per CU, which masks memory latency.
-*   **LDS Tiling:** Custom pre-processing compute shaders utilize Local Data Share (LDS) tiling to avoid memory bandwidth saturation.
-
-## Repository Layout
-
-RDNU has two complementary halves in one repository:
+## Layout
 
 ```
 RDNU/
-├── RDG/                  # Upstream RDG research code (BasicSR) — the training baseline
-├── scripts/              # Training, data-synthesis, profiling and utility scripts (Python)
-├── runtime/              # Native real-time upscaler (DX12/HLSL today; Vulkan/CUDA planned)
-│   ├── src/              #   DX12 backend + custom FidelityFX provider
-│   ├── shaders/          #   HLSL compute shaders (WMMA INT8 conv, CTR, DFM, upsample)
-│   ├── models/           #   Exported INT8/FP16 weights (Git LFS)
-│   ├── tools/            #   Weight export + build helpers
-│   ├── tests/            #   Toolchain smoke tests
-│   └── external/         #   Submodules: vcpkg, DirectX-Headers, FidelityFX-SDK fork
-├── docs/                 # Build + implementation docs
-├── CMakeLists.txt        # VS Code CMake entry point for the native runtime
-└── CMakePresets.json
+├── docs/                 # plans and reviews (start with NSS_Runtime_Plan.md)
+├── ml/
+│   ├── model-gym/        # Arm Neural Graphics Model Gym (train / fine-tune / QAT / export)   [submodule]
+│   ├── capture-unreal/   # UE 5.5 dataset capture plugin                                     [submodule]
+│   ├── models/nss, nfru  # released weights (Git LFS)                                        [submodules]
+│   └── data/             # datasets, opt-in submodules (see docs/Datasets.md)
+├── runtime/
+│   ├── harness/          # standalone DX12 engine + kernels, validated layer by layer vs golden
+│   ├── tools/            # nss_export.py (NSS bundles), dump_golden.py (RDG bundles)
+│   ├── src/, shaders/    # FSR-sample backend and its placeholder shaders (to be replaced)
+│   └── external/         # vcpkg, DirectX-Headers, FidelityFX SDK fork, Arm Neural Graphics SDK
+├── RDG/, scripts/        # RDG baseline: training code, configs, utilities
+└── CMakeLists.txt, CMakePresets.json
 ```
 
-## Installation and Setup
+## Setup
 
-### Prerequisites
-- Python 3.8+ / PyTorch 2.0+
-- Windows 10/11 (for the DirectML inference backend) / Linux (for training)
-- AMD Radeon RX 7000 Series GPU (Targeting RX 7900 XTX)
-
-### Training Note
-This project implements a very highly customized training configuration for RDG/BasicSR that is extremely optimized for AMD Zen2 CPUs (specifically, the AMD EPYC 7F52) and a quad Nvidia Ampere GPU setup without NVLink. It was tested periodically throuhgout training on a separate RTX3060 without interrupting the training schedule. If you intend on running this training yourself, you will likely need to adjust the configuration to your system. The /RDG/options/test and /RDG/options/train folders contain the relevant yaml files to configure. The G-Buffer data synthesis and other scripts should work independant of configuration. Consider adjusting the execution bash scripts as well to change CUDA visible devices if needed. 
-
-### Cloning the Repository
 ```bash
-# Clone with submodules (vcpkg, DirectX-Headers, the FidelityFX-SDK fork).
-# The SDK fork submodule is fetched over SSH, so an SSH key with access to the
-# Adam-AtlasSoftware org is required.
-git clone --recurse-submodules git@github.com:Adam-AtlasSoftware/RDNU.git
+git clone --recurse-submodules git@github.com:Adam-AtlasSoftware/RDNU.git   # FidelityFX fork needs SSH
 cd RDNU
-git lfs pull            # fetch the INT8/FP16 model weights (runtime/models/**/*.bin)
-
-# If you already cloned without --recurse-submodules:
-git submodule update --init --recursive
+git -C ml/models/nss lfs pull                    # 15 MB of weights
 ```
 
-### Environment Setup (Training)
-Training is handled via distributed PyTorch (DDP). Execution scripts are provided to configure the environment, define GPU utilization, and launch the distributed loop.
+Datasets are opt-in submodules; fetch instructions and licences: [docs/Datasets.md](docs/Datasets.md).
+Windows build (VS Code + CMake, DXC): [docs/build-windows.md](docs/build-windows.md).
+
+## Validating the network on the GPU
 
 ```bash
-# Launch the Base x2 architecture distributed training loop
-./scripts/training/start_training_base_x2.sh
+pip install torch numpy                          # CPU is fine
+python runtime/tools/nss_export.py               # -> runtime/tools/golden/nss_backbone{,_int8}.rdnut
+cmake --build build --target run_engine          # runs every bundle through the DX12 engine
 ```
 
-## Model Architecture & Training Pipeline
+`run_engine` prints max|err| per bundle and per checkpoint; fp32 must be within 1e-3, INT8
+bit-exact against the integer-path reference.
 
-The core network is a causal recurrent model based on the Decoupled G-buffer Guidance (RDG) framework. The current iteration (Base variant, called RDNU-L) utilizes 36 feature channels to retain complex texture dictionaries and relies on SSIM, L1, FFT, and Temporal Consistency loss functions. The smaller variant based on RDG-s (which we'll call RDNU-S) utilizes 16 channels.
+## Documents
 
-### Dataset Processing
-The network is trained against the **MPI-Sintel** and **Virtual KITTI 2 (vKITTI)** datasets with pretraining on **GameIR** and **M3VIR** and The data loaders dynamically synthesize incomplete G-Buffers to ensure the model processes a pipeline identical to commercial game engines:
-- **Surface Normal Derivation:** 3D Surface Normals are calculated analytically on the CPU using Sobel operators across the 16-bit depth maps.
-- **Albedo/BRDF Mapping:** Material boundaries are derived using raw Class Segmentation maps.
-- **Engine Flow:** The dataloaders parse raw `.flo` binaries and 16-bit vector maps, applying magnitude scaling appropriate for the targeted output resolution.
-- **Degradation:** Halton sequence jitter is applied prior to downsampling to mimic TAA characteristics.
+- [NSS_Runtime_Plan.md](docs/NSS_Runtime_Plan.md): architecture, passes, network contract, INT8 scheme, work list
+- [NSS_Quality_Plan.md](docs/NSS_Quality_Plan.md): reaching FSR4-class detail; RDNA2 and RDNA3 tiers
+- [Model_Candidates.md](docs/Model_Candidates.md): the model review that led here
+- [Datasets.md](docs/Datasets.md): sources, licences, fetching
+- [RDNU_Runtime_Plan.md](docs/RDNU_Runtime_Plan.md): engine design (tensor layout, WMMA conv), RDG parts superseded
 
-## Upscaler Implementation
+## Licences
 
-The native runtime lives in [`runtime/`](runtime/) and integrates into a fork of AMD's
-FidelityFX SDK (the Cauldron2 / FSR DX12 sample), pinned as a submodule:
-
-| Path | Contents |
-|------|----------|
-| `runtime/src/` | DX12 backend (`rdg_dx12_backend.cpp`) + custom FidelityFX provider (`ffx_provider_rdg.h`) |
-| `runtime/shaders/` | HLSL compute shaders — WMMA INT8 conv, CTR temporal block, DFM, upsample |
-| `runtime/models/` | Exported INT8 / FP16 weights (Git LFS) |
-| `runtime/tools/` | `export_weights.py` (PyTorch → OHWI FP16/INT8 `.bin`) |
-| `runtime/external/FidelityFX-SDK_WithFSR4` | FSR SDK fork (`rdnu` branch) that compiles the RDNU backend into the sample |
-
-The DX12 backend currently builds *inside* the FSR sample (it depends on the full
-Cauldron/FidelityFX include+link tree). A standalone, cross-platform inference/test harness
-(Vulkan cooperative-matrix / CUDA) for **Nvidia + Linux** is planned — see
-[`docs/build-linux.md`](docs/build-linux.md).
-
-> **Status:** shaders are work-in-progress — the WMMA convolution kernel is a template
-> pending final wave-matrix wiring.
-
-### Building
-- **Windows (DX12 sample):** [`docs/build-windows.md`](docs/build-windows.md) — build, run and
-  debug entirely from **VS Code** (the Visual Studio IDE is not required).
-- **Linux / Nvidia (planned runtime):** [`docs/build-linux.md`](docs/build-linux.md).
-
-## License
-
-This project is licensed under the GPL3 License - see the [LICENSE](LICENSE) file for details.
+RDNU is GPL-3.0 ([LICENSE](LICENSE)). Arm NSS weights: Arm AI Model Community License v1.0
+(commercial use permitted; acceptable-use pass-through, notices, marked modifications). Model gym
+and capture plugin: Apache-2.0. Arm Neural Graphics SDK: MIT. RDG: Apache-2.0. Datasets: see
+[docs/Datasets.md](docs/Datasets.md).
 
 ## Acknowledgments
 
-- The [RDG (Efficient Video Super-Resolution for Real-time Rendering)](https://github.com/sunny2109/RDG) authors for the baseline architecture concept.
-- Creators of the [MPI-Sintel](http://sintel.is.tue.mpg.de/) and [Virtual KITTI 2](https://europe.naverlabs.com/research/computer-vision/proxy-virtual-worlds-vkitti-2/) datasets.
-- Creators of the [GameIR](https://huggingface.co/datasets/LLLebin/GameIR) and [M3VIR](https://huggingface.co/datasets/guluthemonster/M3VIR) datasets.
+Arm (Neural Super Sampling, Model Gym, SDK), the [RDG](https://github.com/sunny2109/RDG) authors,
+and the creators of the GameIR, M3VIR, MPI-Sintel and Virtual KITTI 2 datasets.

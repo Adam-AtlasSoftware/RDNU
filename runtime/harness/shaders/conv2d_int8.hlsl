@@ -25,10 +25,13 @@ cbuffer Dims : register(b0)
     uint StrideH; uint StrideW; uint Groups; uint OH; uint OW;
 };
 
-int quant(float v, float invA)
+// AScale = [scale, zero_point, qmin, qmax]. Symmetric layers (RDG) use [s, 0, -127, 127];
+// affine layers (NSS QAT, post-ReLU ranges) use [s, -128, -128, 127]. The zero point is
+// subtracted before the multiply, so the accumulator is the same integer the reference computes.
+int quant(float v, float invA, int zp, int qmin, int qmax)
 {
     // round-half-up (floor(x+0.5)); the numpy reference uses the identical formula so GPU == ref.
-    return clamp(int(floor(v * invA + 0.5f)), -127, 127);
+    return clamp(int(floor(v * invA + 0.5f)) + zp, qmin, qmax) - zp;
 }
 
 [numthreads(8, 8, 1)]
@@ -40,6 +43,9 @@ void conv2d_int8_CS(uint3 tid : SV_DispatchThreadID)
 
     float aScale = AScale[0];
     float invA   = 1.0f / aScale;
+    int   zp     = int(AScale[1]);
+    int   qmin   = int(AScale[2]);
+    int   qmax   = int(AScale[3]);
 
     uint inPerGroup  = Cin / Groups;
     uint outPerGroup = Cout / Groups;
@@ -57,7 +63,7 @@ void conv2d_int8_CS(uint3 tid : SV_DispatchThreadID)
             {
                 int ix = int(ox * StrideW + kx) - int(PadW);
                 if (ix < 0 || ix >= int(W)) continue;
-                int xq = quant(Input[(ic * H + uint(iy)) * W + uint(ix)], invA);
+                int xq = quant(Input[(ic * H + uint(iy)) * W + uint(ix)], invA, zp, qmin, qmax);
                 int wq = int(Wi8[((oc * KH + ky) * KW + kx) * inPerGroup + icl]);
                 acc += xq * wq;
             }
