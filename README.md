@@ -23,7 +23,8 @@ binaries under Wine:
   inputs. That is 16 frames at 248×232, too small to generalise.
 
 Next, on a 7900 XTX and a 6800 XT: timings (`runtime/tools/eval/bench.md`), the FSR sample, games,
-and comparison with FSR 4.1. Retraining is decided after that
+and comparison with FSR 4.1. Retraining on more data is scripted
+([ml/retrain](ml/retrain/README.md)) and decided after that
 ([docs/NSS_Quality_Plan.md](docs/NSS_Quality_Plan.md)).
 
 ## Build
@@ -50,6 +51,7 @@ runtime/
 ├── harness/           network timing, whole-upscale bench, reference engine
 ├── integration/       the FSR sample patch for the FidelityFX SDK fork
 └── external/          FidelityFX SDK fork, Arm neural graphics SDK, DirectX-Headers
+ml/retrain/            fine-tune, QAT, export and install a retrained model
 ml/                    model gym, capture plugin, weights, datasets (submodules)
 RDG/, scripts/         the earlier RDG model, kept as a baseline
 ```

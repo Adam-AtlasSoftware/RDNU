@@ -117,6 +117,8 @@ AMD's public FSR4 description all converge on. Decision (2026-09-24): the leaked
 
 ## 6. Order of work
 
+Steps 2 and 5 run through `ml/retrain` (data preparation, fine-tune, QAT, export into the runtime).
+
 1. Baseline: stock NSS-high in the HLSL runtime (the week-one experiment in Model_Candidates.md §9),
    RCAS added, measured against FSR4 on the same sequences.
 2. Engine-side LOD bias + jitter length verified in capture and runtime; recapture; retrain stock.
